@@ -10,6 +10,19 @@ before making a change.
 
 [This video](https://www.youtube.com/watch?v=kNavnhzZHtk) walks through the process of adding a small feature to lazygit. If you have no idea where to start, watching that video is a good first step.
 
+## Design principles
+
+See [here](./VISION.md) for a set of design principles that we want to consider when building a feature or making a change.
+
+## Codebase guide
+
+[This doc](./docs/dev/Codebase_Guide.md) explains:
+* what the different packages in the codebase are for
+* where important files live
+* important concepts in the code
+* how the event loop works
+* other useful information
+
 ## All code changes happen through Pull Requests
 
 Pull requests are the best way to propose changes to the codebase. We actively
@@ -20,6 +33,8 @@ welcome your pull requests:
 3. If you've added code that need documentation, update the documentation.
 4. Write a [good commit message](http://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html).
 5. Issue that pull request!
+
+Please do not raise pull request from your fork's master branch: make a feature branch instead. Lazygit maintainers will sometimes push changes to your branch when reviewing a PR and we often can't do this if you use your master branch.
 
 If you've never written Go in your life, then join the club! Lazygit was the maintainer's first Go program, and most contributors have never used Go before. Go is widely considered an easy-to-learn language, so if you're looking for an open source project to gain dev experience, you've come to the right place.
 
@@ -97,6 +112,10 @@ To run gofumpt from your terminal go:
 go install mvdan.cc/gofumpt@latest && gofumpt -l -w .
 ```
 
+## Programming Font
+
+Lazygit supports [Nerd Fonts](https://www.nerdfonts.com) to render certain icons. Sometimes we use some of these icons verbatim in string literals in the code (mainly in tests), so you need to set your development environment to use a nerd font to see these.
+
 ## Internationalisation
 
 Boy that's a hard word to spell. Anyway, lazygit is translated into several languages within the pkg/i18n package. If you need to render text to the user, you should add a new field to the TranslationSet struct in `pkg/i18n/english.go` and add the actual content within the `EnglishTranslationSet()` method in the same file. Then you can access via `gui.Tr.YourNewText` (or `self.c.Tr.YourNewText`, etc). Although it is appreciated if you translate the text into other languages, it's not expected of you (google translate will likely do a bad job anyway!).
@@ -139,31 +158,7 @@ If you want to trigger a debug session from VSCode, you can use the following sn
 
 ## Profiling
 
-If you want to investigate what's contributing to CPU usage you can add the following to the top of the `main()` function in `main.go`
-
-```go
-import "runtime/pprof"
-
-func main() {
-	f, err := os.Create("cpu.prof")
-	if err != nil {
-		log.Fatal("could not create CPU profile: ", err)
-	}
-	defer f.Close()
-	if err := pprof.StartCPUProfile(f); err != nil {
-		log.Fatal("could not start CPU profile: ", err)
-	}
-	defer pprof.StopCPUProfile()
-	...
-```
-
-Then run lazygit, and afterwards, from your terminal, run:
-
-```sh
-go tool pprof --web cpu.prof
-```
-
-That should open an application which allows you to view the breakdown of CPU usage.
+If you want to investigate what's contributing to CPU or memory usage, see [this separate document](docs/dev/Profiling.md).
 
 ## Testing
 

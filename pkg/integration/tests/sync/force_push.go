@@ -26,13 +26,13 @@ var ForcePush = NewIntegrationTest(NewIntegrationTestArgs{
 				Contains("one"),
 			)
 
-		t.Views().Status().Content(Contains("↓1 repo → master"))
+		t.Views().Status().Content(Equals("↓1 repo → master"))
 
 		t.Views().Files().IsFocused().Press(keys.Universal.Push)
 
 		t.ExpectPopup().Confirmation().
 			Title(Equals("Force push")).
-			Content(Equals("Your branch has diverged from the remote branch. Press 'esc' to cancel, or 'enter' to force push.")).
+			Content(Equals("Your branch has diverged from the remote branch. Press <esc> to cancel, or <enter> to force push.")).
 			Confirm()
 
 		t.Views().Commits().
@@ -40,7 +40,7 @@ var ForcePush = NewIntegrationTest(NewIntegrationTestArgs{
 				Contains("one"),
 			)
 
-		t.Views().Status().Content(Contains("✓ repo → master"))
+		t.Views().Status().Content(Equals("✓ repo → master"))
 
 		t.Views().Remotes().Focus().
 			Lines(Contains("origin")).

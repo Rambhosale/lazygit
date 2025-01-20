@@ -1,9 +1,8 @@
 package oscommands
 
 import (
-	"fmt"
+	"errors"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -87,7 +86,7 @@ func CopyDir(src string, dst string) (err error) {
 		return err
 	}
 	if !si.IsDir() {
-		return fmt.Errorf("source is not a directory")
+		return errors.New("source is not a directory")
 	}
 
 	_, err = os.Stat(dst)
@@ -106,7 +105,7 @@ func CopyDir(src string, dst string) (err error) {
 		return //nolint: nakedret
 	}
 
-	entries, err := ioutil.ReadDir(src)
+	entries, err := os.ReadDir(src)
 	if err != nil {
 		return //nolint: nakedret
 	}
@@ -121,8 +120,14 @@ func CopyDir(src string, dst string) (err error) {
 				return //nolint: nakedret
 			}
 		} else {
+			var info os.FileInfo
+			info, err = entry.Info()
+			if err != nil {
+				return //nolint: nakedret
+			}
+
 			// Skip symlinks.
-			if entry.Mode()&os.ModeSymlink != 0 {
+			if info.Mode()&os.ModeSymlink != 0 {
 				continue
 			}
 

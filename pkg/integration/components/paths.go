@@ -3,9 +3,9 @@ package components
 import "path/filepath"
 
 // convenience struct for easily getting directories within our test directory.
-// We have one test directory for each test, found in test/results.
+// We have one test directory for each test, found in test/_results.
 type Paths struct {
-	// e.g. test/results/test_name
+	// e.g. test/_results/test_name
 	root string
 }
 
@@ -25,13 +25,6 @@ func (self Paths) Actual() string {
 // where a lazygit test will start within.
 func (self Paths) ActualRepo() string {
 	return filepath.Join(self.Actual(), "repo")
-}
-
-// When an integration test first runs, we copy everything in the 'actual' directory,
-// and copy it into the 'expected' directory so that future runs can be compared
-// against what we expect.
-func (self Paths) Expected() string {
-	return filepath.Join(self.root, "expected")
 }
 
 func (self Paths) Config() string {

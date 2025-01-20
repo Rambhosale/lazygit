@@ -8,6 +8,7 @@ type Views struct {
 	Files          *gocui.View
 	Branches       *gocui.View
 	Remotes        *gocui.View
+	Worktrees      *gocui.View
 	Tags           *gocui.View
 	RemoteBranches *gocui.View
 	ReflogCommits  *gocui.View
@@ -33,6 +34,8 @@ type Views struct {
 	AppStatus         *gocui.View
 	Search            *gocui.View
 	SearchPrefix      *gocui.View
+	StatusSpacer1     *gocui.View
+	StatusSpacer2     *gocui.View
 	Limit             *gocui.View
 	Suggestions       *gocui.View
 	Tooltip           *gocui.View

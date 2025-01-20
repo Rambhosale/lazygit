@@ -10,45 +10,24 @@ import (
 
 type ViewDriver struct {
 	// context is prepended to any error messages e.g. 'context: "current view"'
-	context              string
-	getView              func() *gocui.View
-	t                    *TestDriver
-	getSelectedLinesFn   func() ([]string, error)
-	getSelectedRangeFn   func() (int, int, error)
-	getSelectedLineIdxFn func() (int, error)
+	context string
+	getView func() *gocui.View
+	t       *TestDriver
 }
 
-func (self *ViewDriver) getSelectedLines() ([]string, error) {
-	if self.getSelectedLinesFn == nil {
-		view := self.t.gui.View(self.getView().Name())
-
-		return []string{view.SelectedLine()}, nil
-	}
-
-	return self.getSelectedLinesFn()
+func (self *ViewDriver) getSelectedLines() []string {
+	view := self.t.gui.View(self.getView().Name())
+	return view.SelectedLines()
 }
 
-func (self *ViewDriver) getSelectedRange() (int, int, error) {
-	if self.getSelectedRangeFn == nil {
-		view := self.t.gui.View(self.getView().Name())
-		idx := view.SelectedLineIdx()
-
-		return idx, idx, nil
-	}
-
-	return self.getSelectedRangeFn()
+func (self *ViewDriver) getSelectedRange() (int, int) {
+	view := self.t.gui.View(self.getView().Name())
+	return view.SelectedLineRange()
 }
 
-// even if you have a selected range, there may still be a line within that range
-// which the cursor points at. This function returns that line index.
-func (self *ViewDriver) getSelectedLineIdx() (int, error) {
-	if self.getSelectedLineIdxFn == nil {
-		view := self.t.gui.View(self.getView().Name())
-
-		return view.SelectedLineIdx(), nil
-	}
-
-	return self.getSelectedLineIdxFn()
+func (self *ViewDriver) getSelectedLineIdx() int {
+	view := self.t.gui.View(self.getView().Name())
+	return view.SelectedLineIdx()
 }
 
 // asserts that the view has the expected title
@@ -82,7 +61,21 @@ func (self *ViewDriver) TopLines(matchers ...*TextMatcher) *ViewDriver {
 	return self.assertLines(0, matchers...)
 }
 
-// asserts that somewhere in the view there are consequetive lines matching the given matchers.
+// Asserts on the visible lines of the view.
+// Note, this assumes that the view's viewport is filled with lines
+func (self *ViewDriver) VisibleLines(matchers ...*TextMatcher) *ViewDriver {
+	self.validateMatchersPassed(matchers)
+	self.validateVisibleLineCount(matchers)
+
+	// Get the origin of the view and offset that.
+	// Note that we don't do any retrying here so if we want to bring back retry logic
+	// we'll need to update this.
+	originY := self.getView().OriginY()
+
+	return self.assertLines(originY, matchers...)
+}
+
+// asserts that somewhere in the view there are consecutive lines matching the given matchers.
 func (self *ViewDriver) ContainsLines(matchers ...*TextMatcher) *ViewDriver {
 	self.validateMatchersPassed(matchers)
 	self.validateEnoughLines(matchers)
@@ -91,7 +84,7 @@ func (self *ViewDriver) ContainsLines(matchers ...*TextMatcher) *ViewDriver {
 		content := self.getView().Buffer()
 		lines := strings.Split(content, "\n")
 
-		startIdx, endIdx, err := self.getSelectedRange()
+		startIdx, endIdx := self.getSelectedRange()
 
 		for i := 0; i < len(lines)-len(matchers)+1; i++ {
 			matches := true
@@ -104,10 +97,6 @@ func (self *ViewDriver) ContainsLines(matchers ...*TextMatcher) *ViewDriver {
 					break
 				}
 				if checkIsSelected {
-					if err != nil {
-						matches = false
-						break
-					}
 					if lineIdx < startIdx || lineIdx > endIdx {
 						matches = false
 						break
@@ -167,10 +156,7 @@ func (self *ViewDriver) SelectedLines(matchers ...*TextMatcher) *ViewDriver {
 	self.validateEnoughLines(matchers)
 
 	self.t.assertWithRetries(func() (bool, string) {
-		selectedLines, err := self.getSelectedLines()
-		if err != nil {
-			return false, err.Error()
-		}
+		selectedLines := self.getSelectedLines()
 
 		selectedContent := strings.Join(selectedLines, "\n")
 		expectedContent := expectedContentFromMatchers(matchers)
@@ -212,12 +198,47 @@ func (self *ViewDriver) validateEnoughLines(matchers []*TextMatcher) {
 	})
 }
 
+// assumes the view's viewport is filled with lines
+func (self *ViewDriver) validateVisibleLineCount(matchers []*TextMatcher) {
+	view := self.getView()
+
+	self.t.assertWithRetries(func() (bool, string) {
+		count := view.InnerHeight()
+		return count == len(matchers), fmt.Sprintf("unexpected number of visible lines in view '%s'. Expected exactly %d, got %d", view.Name(), len(matchers), count)
+	})
+}
+
 func (self *ViewDriver) assertLines(offset int, matchers ...*TextMatcher) *ViewDriver {
 	view := self.getView()
 
+	var expectedStartIdx, expectedEndIdx int
+	foundSelectionStart := false
+	foundSelectionEnd := false
+	expectedSelectedLines := []string{}
+
 	for matcherIndex, matcher := range matchers {
 		lineIdx := matcherIndex + offset
+
 		checkIsSelected, matcher := matcher.checkIsSelected()
+
+		if checkIsSelected {
+			if foundSelectionEnd {
+				self.t.fail("The IsSelected matcher can only be used on a contiguous range of lines.")
+			}
+			if !foundSelectionStart {
+				expectedStartIdx = lineIdx
+				foundSelectionStart = true
+			}
+			expectedSelectedLines = append(expectedSelectedLines, matcher.name())
+			expectedEndIdx = lineIdx
+		} else if foundSelectionStart {
+			foundSelectionEnd = true
+		}
+	}
+
+	for matcherIndex, matcher := range matchers {
+		lineIdx := matcherIndex + offset
+		expectSelected, matcher := matcher.checkIsSelected()
 
 		self.t.matchString(matcher, fmt.Sprintf("Unexpected content in view '%s'.", view.Name()),
 			func() string {
@@ -225,30 +246,41 @@ func (self *ViewDriver) assertLines(offset int, matchers ...*TextMatcher) *ViewD
 			},
 		)
 
-		if checkIsSelected {
+		// If any of the matchers care about the selection, we need to
+		// assert on the selection for each matcher.
+		if foundSelectionStart {
 			self.t.assertWithRetries(func() (bool, string) {
-				startIdx, endIdx, err := self.getSelectedRange()
-				if err != nil {
-					return false, err.Error()
+				startIdx, endIdx := self.getSelectedRange()
+
+				selected := lineIdx >= startIdx && lineIdx <= endIdx
+
+				if (selected && expectSelected) || (!selected && !expectSelected) {
+					return true, ""
 				}
 
-				if lineIdx < startIdx || lineIdx > endIdx {
-					if startIdx == endIdx {
-						return false, fmt.Sprintf("Unexpected selected line index in view '%s'. Expected %d, got %d", view.Name(), lineIdx, startIdx)
-					} else {
-						lines, err := self.getSelectedLines()
-						if err != nil {
-							return false, err.Error()
-						}
-						return false, fmt.Sprintf("Unexpected selected line index in view '%s'. Expected line %d to be in range %d to %d. Selected lines:\n---\n%s\n---\n\nExpected line: '%s'", view.Name(), lineIdx, startIdx, endIdx, strings.Join(lines, "\n"), matcher.name())
-					}
-				}
-				return true, ""
+				lines := self.getSelectedLines()
+
+				return false, fmt.Sprintf(
+					"Unexpected selection in view '%s'. Expected %s to be selected but got %s.\nExpected selected lines:\n---\n%s\n---\n\nActual selected lines:\n---\n%s\n---\n",
+					view.Name(),
+					formatLineRange(expectedStartIdx, expectedEndIdx),
+					formatLineRange(startIdx, endIdx),
+					strings.Join(expectedSelectedLines, "\n"),
+					strings.Join(lines, "\n"),
+				)
 			})
 		}
 	}
 
 	return self
+}
+
+func formatLineRange(from int, to int) string {
+	if from == to {
+		return "line " + fmt.Sprintf("%d", from)
+	}
+
+	return "lines " + fmt.Sprintf("%d-%d", from, to)
 }
 
 // asserts on the content of the view i.e. the stuff within the view's frame.
@@ -262,15 +294,11 @@ func (self *ViewDriver) Content(matcher *TextMatcher) *ViewDriver {
 	return self
 }
 
-// asserts on the selected line of the view. If your view has multiple lines selected,
-// but also has a concept of a cursor position, this will assert on the line that
-// the cursor is on. Otherwise it will assert on the first line of the selection.
+// asserts on the selected line of the view. If you are selecting a range,
+// you should use the SelectedLines method instead.
 func (self *ViewDriver) SelectedLine(matcher *TextMatcher) *ViewDriver {
 	self.t.assertWithRetries(func() (bool, string) {
-		selectedLineIdx, err := self.getSelectedLineIdx()
-		if err != nil {
-			return false, err.Error()
-		}
+		selectedLineIdx := self.getSelectedLineIdx()
 
 		viewLines := self.getView().BufferLines()
 
@@ -306,7 +334,7 @@ func (self *ViewDriver) Focus() *ViewDriver {
 	}
 	windows := []window{
 		{name: "status", viewNames: []string{"status"}},
-		{name: "files", viewNames: []string{"files", "submodules"}},
+		{name: "files", viewNames: []string{"files", "worktrees", "submodules"}},
 		{name: "branches", viewNames: []string{"localBranches", "remotes", "tags"}},
 		{name: "commits", viewNames: []string{"commits", "reflogCommits"}},
 		{name: "stash", viewNames: []string{"stash"}},
@@ -369,14 +397,43 @@ func (self *ViewDriver) Press(keyStr string) *ViewDriver {
 	return self
 }
 
+func (self *ViewDriver) Delay() *ViewDriver {
+	self.t.Wait(self.t.inputDelay)
+
+	return self
+}
+
+// for use when typing or navigating, because in demos we want that to happen
+// faster
+func (self *ViewDriver) PressFast(keyStr string) *ViewDriver {
+	self.IsFocused()
+
+	self.t.pressFast(keyStr)
+
+	return self
+}
+
+func (self *ViewDriver) Click(x, y int) *ViewDriver {
+	offsetX, offsetY, _, _ := self.getView().Dimensions()
+
+	self.t.click(offsetX+1+x, offsetY+1+y)
+
+	return self
+}
+
 // i.e. pressing down arrow
 func (self *ViewDriver) SelectNextItem() *ViewDriver {
-	return self.Press(self.t.keys.Universal.NextItem)
+	return self.PressFast(self.t.keys.Universal.NextItem)
 }
 
 // i.e. pressing up arrow
 func (self *ViewDriver) SelectPreviousItem() *ViewDriver {
-	return self.Press(self.t.keys.Universal.PrevItem)
+	return self.PressFast(self.t.keys.Universal.PrevItem)
+}
+
+// i.e. pressing '<'
+func (self *ViewDriver) GotoTop() *ViewDriver {
+	return self.PressFast(self.t.keys.Universal.GotoTop)
 }
 
 // i.e. pressing space
@@ -405,22 +462,16 @@ func (self *ViewDriver) PressEscape() *ViewDriver {
 // - the user is not in a list item
 // - no list item is found containing the given text
 // - multiple list items are found containing the given text in the initial page of items
-//
-// NOTE: this currently assumes that BufferLines returns all the lines that can be accessed.
-// If this changes in future, we'll need to update this code to first attempt to find the item
-// in the current page and failing that, jump to the top of the view and iterate through all of it,
-// looking for the item.
 func (self *ViewDriver) NavigateToLine(matcher *TextMatcher) *ViewDriver {
 	self.IsFocused()
 
 	view := self.getView()
+	lines := view.BufferLines()
 
-	var matchIndex int
+	matchIndex := -1
 
 	self.t.assertWithRetries(func() (bool, string) {
-		matchIndex = -1
 		var matches []string
-		lines := view.BufferLines()
 		// first we look for a duplicate on the current screen. We won't bother looking beyond that though.
 		for i, line := range lines {
 			ok, _ := matcher.test(line)
@@ -431,32 +482,51 @@ func (self *ViewDriver) NavigateToLine(matcher *TextMatcher) *ViewDriver {
 		}
 		if len(matches) > 1 {
 			return false, fmt.Sprintf("Found %d matches for `%s`, expected only a single match. Matching lines:\n%s", len(matches), matcher.name(), strings.Join(matches, "\n"))
-		} else if len(matches) == 0 {
-			return false, fmt.Sprintf("Could not find item matching: %s. Lines:\n%s", matcher.name(), strings.Join(lines, "\n"))
-		} else {
-			return true, ""
 		}
+		return true, ""
 	})
 
-	selectedLineIdx, err := self.getSelectedLineIdx()
-	if err != nil {
-		self.t.fail(err.Error())
-		return self
-	}
-	if selectedLineIdx == matchIndex {
-		self.SelectedLine(matcher)
-	} else if selectedLineIdx < matchIndex {
-		for i := selectedLineIdx; i < matchIndex; i++ {
-			self.SelectNextItem()
-		}
-		self.SelectedLine(matcher)
-	} else {
-		for i := selectedLineIdx; i > matchIndex; i-- {
-			self.SelectPreviousItem()
-		}
-		self.SelectedLine(matcher)
+	// If no match was found, it could be that this is a view that renders only
+	// the visible lines. In that case, we jump to the top and then press
+	// down-arrow until we found the match. We simply return the first match we
+	// find, so we have no way to assert that there are no duplicates.
+	if matchIndex == -1 {
+		self.GotoTop()
+		matchIndex = len(lines)
 	}
 
+	selectedLineIdx := self.getSelectedLineIdx()
+	if selectedLineIdx == matchIndex {
+		return self.SelectedLine(matcher)
+	}
+
+	// At this point we can't just take the difference of selected and matched
+	// index and press up or down arrow this many times. The reason is that
+	// there might be section headers between those lines, and these will be
+	// skipped when pressing up or down arrow. So we must keep pressing the
+	// arrow key in a loop, and check after each one whether we now reached the
+	// target line.
+	var maxNumKeyPresses int
+	var keyPress func()
+	if selectedLineIdx < matchIndex {
+		maxNumKeyPresses = matchIndex - selectedLineIdx
+		keyPress = func() { self.SelectNextItem() }
+	} else {
+		maxNumKeyPresses = selectedLineIdx - matchIndex
+		keyPress = func() { self.SelectPreviousItem() }
+	}
+
+	for i := 0; i < maxNumKeyPresses; i++ {
+		keyPress()
+		idx := self.getSelectedLineIdx()
+		// It is important to use view.BufferLines() here and not lines, because it
+		// could change with every keypress.
+		if ok, _ := matcher.test(view.BufferLines()[idx]); ok {
+			return self
+		}
+	}
+
+	self.t.fail(fmt.Sprintf("Could not navigate to item matching: %s. Lines:\n%s", matcher.name(), strings.Join(view.BufferLines(), "\n")))
 	return self
 }
 
@@ -502,7 +572,7 @@ func (self *ViewDriver) IsVisible() *ViewDriver {
 
 func (self *ViewDriver) IsInvisible() *ViewDriver {
 	self.t.assertWithRetries(func() (bool, string) {
-		return !self.getView().Visible, fmt.Sprintf("%s: Expected view to be visible, but it was not", self.context)
+		return !self.getView().Visible, fmt.Sprintf("%s: Expected view to be invisible, but it was not", self.context)
 	})
 
 	return self
@@ -515,11 +585,32 @@ func (self *ViewDriver) FilterOrSearch(text string) *ViewDriver {
 	self.Press(self.t.keys.Universal.StartSearch).
 		Tap(func() {
 			self.t.ExpectSearch().
+				Clear().
 				Type(text).
 				Confirm()
 
 			self.t.Views().Search().IsVisible().Content(Contains(fmt.Sprintf("matches for '%s'", text)))
 		})
+
+	return self
+}
+
+func (self *ViewDriver) SetCaption(caption string) *ViewDriver {
+	self.t.gui.SetCaption(caption)
+
+	return self
+}
+
+func (self *ViewDriver) SetCaptionPrefix(prefix string) *ViewDriver {
+	self.t.gui.SetCaptionPrefix(prefix)
+
+	return self
+}
+
+func (self *ViewDriver) Wait(milliseconds int) *ViewDriver {
+	if !self.t.gui.Headless() {
+		self.t.Wait(milliseconds)
+	}
 
 	return self
 }

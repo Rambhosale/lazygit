@@ -10,28 +10,30 @@ import (
 
 func TestCommitRewordCommit(t *testing.T) {
 	type scenario struct {
-		testName string
-		runner   *oscommands.FakeCmdObjRunner
-		input    string
+		testName    string
+		runner      *oscommands.FakeCmdObjRunner
+		summary     string
+		description string
 	}
 	scenarios := []scenario{
 		{
 			"Single line reword",
 			oscommands.NewFakeRunner(t).ExpectGitArgs([]string{"commit", "--allow-empty", "--amend", "--only", "-m", "test"}, "", nil),
 			"test",
+			"",
 		},
 		{
 			"Multi line reword",
 			oscommands.NewFakeRunner(t).ExpectGitArgs([]string{"commit", "--allow-empty", "--amend", "--only", "-m", "test", "-m", "line 2\nline 3"}, "", nil),
-			"test\nline 2\nline 3",
+			"test",
+			"line 2\nline 3",
 		},
 	}
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			instance := buildCommitCommands(commonDeps{runner: s.runner})
 
-			assert.NoError(t, instance.RewordLastCommit(s.input))
+			assert.NoError(t, instance.RewordLastCommit(s.summary, s.description).Run())
 			s.runner.CheckForMissingCalls()
 		})
 	}
@@ -50,7 +52,8 @@ func TestCommitResetToCommit(t *testing.T) {
 func TestCommitCommitCmdObj(t *testing.T) {
 	type scenario struct {
 		testName             string
-		message              string
+		summary              string
+		description          string
 		configSignoff        bool
 		configSkipHookPrefix string
 		expectedArgs         []string
@@ -59,35 +62,36 @@ func TestCommitCommitCmdObj(t *testing.T) {
 	scenarios := []scenario{
 		{
 			testName:             "Commit",
-			message:              "test",
+			summary:              "test",
 			configSignoff:        false,
 			configSkipHookPrefix: "",
 			expectedArgs:         []string{"commit", "-m", "test"},
 		},
 		{
 			testName:             "Commit with --no-verify flag",
-			message:              "WIP: test",
+			summary:              "WIP: test",
 			configSignoff:        false,
 			configSkipHookPrefix: "WIP",
 			expectedArgs:         []string{"commit", "--no-verify", "-m", "WIP: test"},
 		},
 		{
 			testName:             "Commit with multiline message",
-			message:              "line1\nline2",
+			summary:              "line1",
+			description:          "line2",
 			configSignoff:        false,
 			configSkipHookPrefix: "",
 			expectedArgs:         []string{"commit", "-m", "line1", "-m", "line2"},
 		},
 		{
 			testName:             "Commit with signoff",
-			message:              "test",
+			summary:              "test",
 			configSignoff:        true,
 			configSkipHookPrefix: "",
 			expectedArgs:         []string{"commit", "--signoff", "-m", "test"},
 		},
 		{
 			testName:             "Commit with signoff and no-verify",
-			message:              "WIP: test",
+			summary:              "WIP: test",
 			configSignoff:        true,
 			configSkipHookPrefix: "WIP",
 			expectedArgs:         []string{"commit", "--no-verify", "--signoff", "-m", "WIP: test"},
@@ -95,7 +99,6 @@ func TestCommitCommitCmdObj(t *testing.T) {
 	}
 
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			userConfig := config.GetDefaultConfig()
 			userConfig.Git.Commit.SignOff = s.configSignoff
@@ -104,7 +107,7 @@ func TestCommitCommitCmdObj(t *testing.T) {
 			runner := oscommands.NewFakeRunner(t).ExpectGitArgs(s.expectedArgs, "", nil)
 			instance := buildCommitCommands(commonDeps{userConfig: userConfig, runner: runner})
 
-			assert.NoError(t, instance.CommitCmdObj(s.message).Run())
+			assert.NoError(t, instance.CommitCmdObj(s.summary, s.description).Run())
 			runner.CheckForMissingCalls()
 		})
 	}
@@ -114,7 +117,6 @@ func TestCommitCommitEditorCmdObj(t *testing.T) {
 	type scenario struct {
 		testName      string
 		configSignoff bool
-		configVerbose string
 		expected      []string
 	}
 
@@ -122,41 +124,19 @@ func TestCommitCommitEditorCmdObj(t *testing.T) {
 		{
 			testName:      "Commit using editor",
 			configSignoff: false,
-			configVerbose: "default",
 			expected:      []string{"commit"},
-		},
-		{
-			testName:      "Commit with --no-verbose flag",
-			configSignoff: false,
-			configVerbose: "never",
-			expected:      []string{"commit", "--no-verbose"},
-		},
-		{
-			testName:      "Commit with --verbose flag",
-			configSignoff: false,
-			configVerbose: "always",
-			expected:      []string{"commit", "--verbose"},
 		},
 		{
 			testName:      "Commit with --signoff",
 			configSignoff: true,
-			configVerbose: "default",
 			expected:      []string{"commit", "--signoff"},
-		},
-		{
-			testName:      "Commit with --signoff and --no-verbose",
-			configSignoff: true,
-			configVerbose: "never",
-			expected:      []string{"commit", "--signoff", "--no-verbose"},
 		},
 	}
 
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			userConfig := config.GetDefaultConfig()
 			userConfig.Git.Commit.SignOff = s.configSignoff
-			userConfig.Git.Commit.Verbose = s.configVerbose
 
 			runner := oscommands.NewFakeRunner(t).ExpectGitArgs(s.expected, "", nil)
 			instance := buildCommitCommands(commonDeps{userConfig: userConfig, runner: runner})
@@ -170,7 +150,7 @@ func TestCommitCommitEditorCmdObj(t *testing.T) {
 func TestCommitCreateFixupCommit(t *testing.T) {
 	type scenario struct {
 		testName string
-		sha      string
+		hash     string
 		runner   *oscommands.FakeCmdObjRunner
 		test     func(error)
 	}
@@ -178,7 +158,7 @@ func TestCommitCreateFixupCommit(t *testing.T) {
 	scenarios := []scenario{
 		{
 			testName: "valid case",
-			sha:      "12345",
+			hash:     "12345",
 			runner: oscommands.NewFakeRunner(t).
 				ExpectGitArgs([]string{"commit", "--fixup=12345"}, "", nil),
 			test: func(err error) {
@@ -188,10 +168,59 @@ func TestCommitCreateFixupCommit(t *testing.T) {
 	}
 
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			instance := buildCommitCommands(commonDeps{runner: s.runner})
-			s.test(instance.CreateFixupCommit(s.sha))
+			s.test(instance.CreateFixupCommit(s.hash))
+			s.runner.CheckForMissingCalls()
+		})
+	}
+}
+
+func TestCommitCreateAmendCommit(t *testing.T) {
+	type scenario struct {
+		testName           string
+		originalSubject    string
+		newSubject         string
+		newDescription     string
+		includeFileChanges bool
+		runner             *oscommands.FakeCmdObjRunner
+	}
+
+	scenarios := []scenario{
+		{
+			testName:           "subject only",
+			originalSubject:    "original subject",
+			newSubject:         "new subject",
+			newDescription:     "",
+			includeFileChanges: true,
+			runner: oscommands.NewFakeRunner(t).
+				ExpectGitArgs([]string{"commit", "-m", "amend! original subject", "-m", "new subject"}, "", nil),
+		},
+		{
+			testName:           "subject and description",
+			originalSubject:    "original subject",
+			newSubject:         "new subject",
+			newDescription:     "new description",
+			includeFileChanges: true,
+			runner: oscommands.NewFakeRunner(t).
+				ExpectGitArgs([]string{"commit", "-m", "amend! original subject", "-m", "new subject\n\nnew description"}, "", nil),
+		},
+		{
+			testName:           "without file changes",
+			originalSubject:    "original subject",
+			newSubject:         "new subject",
+			newDescription:     "",
+			includeFileChanges: false,
+			runner: oscommands.NewFakeRunner(t).
+				ExpectGitArgs([]string{"commit", "-m", "amend! original subject", "-m", "new subject", "--only", "--allow-empty"}, "", nil),
+		},
+	}
+
+	for _, s := range scenarios {
+		t.Run(s.testName, func(t *testing.T) {
+			instance := buildCommitCommands(commonDeps{runner: s.runner})
+			err := instance.CreateAmendCommit(s.originalSubject, s.newSubject, s.newDescription, s.includeFileChanges)
+			assert.NoError(t, err)
 			s.runner.CheckForMissingCalls()
 		})
 	}
@@ -199,54 +228,88 @@ func TestCommitCreateFixupCommit(t *testing.T) {
 
 func TestCommitShowCmdObj(t *testing.T) {
 	type scenario struct {
-		testName         string
-		filterPath       string
-		contextSize      int
-		ignoreWhitespace bool
-		expected         []string
+		testName            string
+		filterPath          string
+		contextSize         uint64
+		similarityThreshold int
+		ignoreWhitespace    bool
+		extDiffCmd          string
+		expected            []string
 	}
 
 	scenarios := []scenario{
 		{
-			testName:         "Default case without filter path",
-			filterPath:       "",
-			contextSize:      3,
-			ignoreWhitespace: false,
-			expected:         []string{"show", "--submodule", "--color=always", "--unified=3", "--stat", "--decorate", "-p", "1234567890"},
+			testName:            "Default case without filter path",
+			filterPath:          "",
+			contextSize:         3,
+			similarityThreshold: 50,
+			ignoreWhitespace:    false,
+			extDiffCmd:          "",
+			expected:            []string{"-C", "/path/to/worktree", "-c", "diff.noprefix=false", "show", "--no-ext-diff", "--submodule", "--color=always", "--unified=3", "--stat", "--decorate", "-p", "1234567890", "--find-renames=50%"},
 		},
 		{
-			testName:         "Default case with filter path",
-			filterPath:       "file.txt",
-			contextSize:      3,
-			ignoreWhitespace: false,
-			expected:         []string{"show", "--submodule", "--color=always", "--unified=3", "--stat", "--decorate", "-p", "1234567890", "--", "file.txt"},
+			testName:            "Default case with filter path",
+			filterPath:          "file.txt",
+			contextSize:         3,
+			similarityThreshold: 50,
+			ignoreWhitespace:    false,
+			extDiffCmd:          "",
+			expected:            []string{"-C", "/path/to/worktree", "-c", "diff.noprefix=false", "show", "--no-ext-diff", "--submodule", "--color=always", "--unified=3", "--stat", "--decorate", "-p", "1234567890", "--find-renames=50%", "--", "file.txt"},
 		},
 		{
-			testName:         "Show diff with custom context size",
-			filterPath:       "",
-			contextSize:      77,
-			ignoreWhitespace: false,
-			expected:         []string{"show", "--submodule", "--color=always", "--unified=77", "--stat", "--decorate", "-p", "1234567890"},
+			testName:            "Show diff with custom context size",
+			filterPath:          "",
+			contextSize:         77,
+			similarityThreshold: 50,
+			ignoreWhitespace:    false,
+			extDiffCmd:          "",
+			expected:            []string{"-C", "/path/to/worktree", "-c", "diff.noprefix=false", "show", "--no-ext-diff", "--submodule", "--color=always", "--unified=77", "--stat", "--decorate", "-p", "1234567890", "--find-renames=50%"},
 		},
 		{
-			testName:         "Show diff, ignoring whitespace",
-			filterPath:       "",
-			contextSize:      77,
-			ignoreWhitespace: true,
-			expected:         []string{"show", "--submodule", "--color=always", "--unified=77", "--stat", "--decorate", "-p", "1234567890", "--ignore-all-space"},
+			testName:            "Show diff with custom similarity threshold",
+			filterPath:          "",
+			contextSize:         3,
+			similarityThreshold: 33,
+			ignoreWhitespace:    false,
+			extDiffCmd:          "",
+			expected:            []string{"-C", "/path/to/worktree", "-c", "diff.noprefix=false", "show", "--no-ext-diff", "--submodule", "--color=always", "--unified=3", "--stat", "--decorate", "-p", "1234567890", "--find-renames=33%"},
+		},
+		{
+			testName:            "Show diff, ignoring whitespace",
+			filterPath:          "",
+			contextSize:         77,
+			similarityThreshold: 50,
+			ignoreWhitespace:    true,
+			extDiffCmd:          "",
+			expected:            []string{"-C", "/path/to/worktree", "-c", "diff.noprefix=false", "show", "--no-ext-diff", "--submodule", "--color=always", "--unified=77", "--stat", "--decorate", "-p", "1234567890", "--ignore-all-space", "--find-renames=50%"},
+		},
+		{
+			testName:            "Show diff with external diff command",
+			filterPath:          "",
+			contextSize:         3,
+			similarityThreshold: 50,
+			ignoreWhitespace:    false,
+			extDiffCmd:          "difft --color=always",
+			expected:            []string{"-C", "/path/to/worktree", "-c", "diff.external=difft --color=always", "-c", "diff.noprefix=false", "show", "--ext-diff", "--submodule", "--color=always", "--unified=3", "--stat", "--decorate", "-p", "1234567890", "--find-renames=50%"},
 		},
 	}
 
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			userConfig := config.GetDefaultConfig()
-			userConfig.Git.DiffContextSize = s.contextSize
+			userConfig.Git.Paging.ExternalDiffCommand = s.extDiffCmd
+			appState := &config.AppState{}
+			appState.IgnoreWhitespaceInDiffView = s.ignoreWhitespace
+			appState.DiffContextSize = s.contextSize
+			appState.RenameSimilarityThreshold = s.similarityThreshold
 
 			runner := oscommands.NewFakeRunner(t).ExpectGitArgs(s.expected, "", nil)
-			instance := buildCommitCommands(commonDeps{userConfig: userConfig, runner: runner})
+			repoPaths := RepoPaths{
+				worktreePath: "/path/to/worktree",
+			}
+			instance := buildCommitCommands(commonDeps{userConfig: userConfig, appState: appState, runner: runner, repoPaths: &repoPaths})
 
-			assert.NoError(t, instance.ShowCmdObj("1234567890", s.filterPath, s.ignoreWhitespace).Run())
+			assert.NoError(t, instance.ShowCmdObj("1234567890", s.filterPath).Run())
 			runner.CheckForMissingCalls()
 		})
 	}
@@ -261,19 +324,17 @@ func TestGetCommitMsg(t *testing.T) {
 	scenarios := []scenario{
 		{
 			"empty",
-			` commit deadbeef`,
+			``,
 			``,
 		},
 		{
 			"no line breaks (single line)",
-			`commit deadbeef
-use generics to DRY up context code`,
+			`use generics to DRY up context code`,
 			`use generics to DRY up context code`,
 		},
 		{
 			"with line breaks",
-			`commit deadbeef
-Merge pull request #1750 from mark2185/fix-issue-template
+			`Merge pull request #1750 from mark2185/fix-issue-template
 
 'git-rev parse' should be 'git rev-parse'`,
 			`Merge pull request #1750 from mark2185/fix-issue-template
@@ -283,10 +344,9 @@ Merge pull request #1750 from mark2185/fix-issue-template
 	}
 
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			instance := buildCommitCommands(commonDeps{
-				runner: oscommands.NewFakeRunner(t).ExpectGitArgs([]string{"rev-list", "--format=%B", "--max-count=1", "deadbeef"}, s.input, nil),
+				runner: oscommands.NewFakeRunner(t).ExpectGitArgs([]string{"-c", "log.showsignature=false", "log", "--format=%B", "--max-count=1", "deadbeef"}, s.input, nil),
 			})
 
 			output, err := instance.GetCommitMessage("deadbeef")
@@ -307,15 +367,14 @@ func TestGetCommitMessageFromHistory(t *testing.T) {
 	scenarios := []scenario{
 		{
 			"Empty message",
-			oscommands.NewFakeRunner(t).ExpectGitArgs([]string{"log", "-1", "--skip=2", "--pretty=%H"}, "", nil).ExpectGitArgs([]string{"rev-list", "--format=%B", "--max-count=1"}, "", nil),
+			oscommands.NewFakeRunner(t).ExpectGitArgs([]string{"log", "-1", "--skip=2", "--pretty=%H"}, "", nil).ExpectGitArgs([]string{"-c", "log.showsignature=false", "log", "--format=%B", "--max-count=1"}, "", nil),
 			func(output string, err error) {
 				assert.Error(t, err)
 			},
 		},
 		{
 			"Default case to retrieve a commit in history",
-			oscommands.NewFakeRunner(t).ExpectGitArgs([]string{"log", "-1", "--skip=2", "--pretty=%H"}, "sha3 \n", nil).ExpectGitArgs([]string{"rev-list", "--format=%B", "--max-count=1", "sha3"}, `commit sha3
-				use generics to DRY up context code`, nil),
+			oscommands.NewFakeRunner(t).ExpectGitArgs([]string{"log", "-1", "--skip=2", "--pretty=%H"}, "hash3 \n", nil).ExpectGitArgs([]string{"-c", "log.showsignature=false", "log", "--format=%B", "--max-count=1", "hash3"}, `use generics to DRY up context code`, nil),
 			func(output string, err error) {
 				assert.NoError(t, err)
 				assert.Equal(t, "use generics to DRY up context code", output)
@@ -324,13 +383,79 @@ func TestGetCommitMessageFromHistory(t *testing.T) {
 	}
 
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			instance := buildCommitCommands(commonDeps{runner: s.runner})
 
 			output, err := instance.GetCommitMessageFromHistory(2)
 
 			s.test(output, err)
+		})
+	}
+}
+
+func TestAddCoAuthorToMessage(t *testing.T) {
+	scenarios := []struct {
+		name           string
+		message        string
+		expectedResult string
+	}{
+		{
+			// This never happens, I think it isn't possible to create a commit
+			// with an empty message. Just including it for completeness.
+			name:           "Empty message",
+			message:        "",
+			expectedResult: "\n\nCo-authored-by: John Doe <john@doe.com>",
+		},
+		{
+			name:           "Just a subject, no body",
+			message:        "Subject",
+			expectedResult: "Subject\n\nCo-authored-by: John Doe <john@doe.com>",
+		},
+		{
+			name:           "Subject and body",
+			message:        "Subject\n\nBody",
+			expectedResult: "Subject\n\nBody\n\nCo-authored-by: John Doe <john@doe.com>",
+		},
+		{
+			name:           "Body already ending with a Co-authored-by line",
+			message:        "Subject\n\nBody\n\nCo-authored-by: Jane Smith <jane@smith.com>",
+			expectedResult: "Subject\n\nBody\n\nCo-authored-by: Jane Smith <jane@smith.com>\nCo-authored-by: John Doe <john@doe.com>",
+		},
+	}
+	for _, s := range scenarios {
+		t.Run(s.name, func(t *testing.T) {
+			result := AddCoAuthorToMessage(s.message, "John Doe <john@doe.com>")
+			assert.Equal(t, s.expectedResult, result)
+		})
+	}
+}
+
+func TestAddCoAuthorToDescription(t *testing.T) {
+	scenarios := []struct {
+		name           string
+		description    string
+		expectedResult string
+	}{
+		{
+			name:           "Empty description",
+			description:    "",
+			expectedResult: "Co-authored-by: John Doe <john@doe.com>",
+		},
+		{
+			name:           "Non-empty description",
+			description:    "Body",
+			expectedResult: "Body\n\nCo-authored-by: John Doe <john@doe.com>",
+		},
+		{
+			name:           "Description already ending with a Co-authored-by line",
+			description:    "Body\n\nCo-authored-by: Jane Smith <jane@smith.com>",
+			expectedResult: "Body\n\nCo-authored-by: Jane Smith <jane@smith.com>\nCo-authored-by: John Doe <john@doe.com>",
+		},
+	}
+	for _, s := range scenarios {
+		t.Run(s.name, func(t *testing.T) {
+			result := AddCoAuthorToDescription(s.description, "John Doe <john@doe.com>")
+			assert.Equal(t, s.expectedResult, result)
 		})
 	}
 }

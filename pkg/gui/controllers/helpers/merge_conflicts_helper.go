@@ -61,22 +61,22 @@ func (self *MergeConflictsHelper) EscapeMerge() error {
 		// to continue the merge/rebase. In that case, we don't want to then push the
 		// files context over it.
 		// So long as both places call OnUIThread, we're fine.
-		if self.c.IsCurrentContext(self.c.Contexts().MergeConflicts) {
-			return self.c.PushContext(self.c.Contexts().Files)
+		if self.c.Context().IsCurrent(self.c.Contexts().MergeConflicts) {
+			self.c.Context().Push(self.c.Contexts().Files)
 		}
 		return nil
 	})
 	return nil
 }
 
-func (self *MergeConflictsHelper) SetConflictsAndRender(path string, isFocused bool) (bool, error) {
+func (self *MergeConflictsHelper) SetConflictsAndRender(path string) (bool, error) {
 	hasConflicts, err := self.setMergeStateWithoutLock(path)
 	if err != nil {
 		return false, err
 	}
 
 	if hasConflicts {
-		return true, self.context().Render(isFocused)
+		return true, self.context().Render()
 	}
 
 	return false, nil
@@ -93,15 +93,16 @@ func (self *MergeConflictsHelper) SwitchToMerge(path string) error {
 		}
 	}
 
-	return self.c.PushContext(self.c.Contexts().MergeConflicts)
+	self.c.Context().Push(self.c.Contexts().MergeConflicts)
+	return nil
 }
 
 func (self *MergeConflictsHelper) context() *context.MergeConflictsContext {
 	return self.c.Contexts().MergeConflicts
 }
 
-func (self *MergeConflictsHelper) Render(isFocused bool) error {
-	content := self.context().GetContentToRender(isFocused)
+func (self *MergeConflictsHelper) Render() {
+	content := self.context().GetContentToRender()
 
 	var task types.UpdateTask
 	if self.context().IsUserScrolling() {
@@ -111,7 +112,7 @@ func (self *MergeConflictsHelper) Render(isFocused bool) error {
 		task = types.NewRenderStringWithScrollTask(content, 0, originY)
 	}
 
-	return self.c.RenderToMainViews(types.RefreshMainOpts{
+	self.c.RenderToMainViews(types.RefreshMainOpts{
 		Pair: self.c.MainViewPairs().MergeConflicts,
 		Main: &types.ViewUpdateOpts{
 			Task: task,
@@ -123,13 +124,13 @@ func (self *MergeConflictsHelper) RefreshMergeState() error {
 	self.c.Contexts().MergeConflicts.GetMutex().Lock()
 	defer self.c.Contexts().MergeConflicts.GetMutex().Unlock()
 
-	if self.c.CurrentContext().GetKey() != context.MERGE_CONFLICTS_CONTEXT_KEY {
+	if self.c.Context().Current().GetKey() != context.MERGE_CONFLICTS_CONTEXT_KEY {
 		return nil
 	}
 
-	hasConflicts, err := self.SetConflictsAndRender(self.c.Contexts().MergeConflicts.GetState().GetPath(), true)
+	hasConflicts, err := self.SetConflictsAndRender(self.c.Contexts().MergeConflicts.GetState().GetPath())
 	if err != nil {
-		return self.c.Error(err)
+		return err
 	}
 
 	if !hasConflicts {

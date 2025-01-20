@@ -11,18 +11,21 @@ import (
 	"github.com/jesseduffield/lazygit/pkg/common"
 	"github.com/jesseduffield/lazygit/pkg/config"
 	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/spf13/afero"
 )
 
 type commonDeps struct {
 	runner     *oscommands.FakeCmdObjRunner
 	userConfig *config.UserConfig
+	appState   *config.AppState
 	gitVersion *GitVersion
 	gitConfig  *git_config.FakeGitConfig
 	getenv     func(string) string
 	removeFile func(string) error
-	dotGitDir  string
 	common     *common.Common
 	cmd        *oscommands.CmdObjBuilder
+	fs         afero.Fs
+	repoPaths  *RepoPaths
 }
 
 func buildGitCommon(deps commonDeps) *GitCommon {
@@ -30,7 +33,17 @@ func buildGitCommon(deps commonDeps) *GitCommon {
 
 	gitCommon.Common = deps.common
 	if gitCommon.Common == nil {
-		gitCommon.Common = utils.NewDummyCommonWithUserConfig(deps.userConfig)
+		gitCommon.Common = utils.NewDummyCommonWithUserConfigAndAppState(deps.userConfig, deps.appState)
+	}
+
+	if deps.fs != nil {
+		gitCommon.Fs = deps.fs
+	}
+
+	if deps.repoPaths != nil {
+		gitCommon.repoPaths = deps.repoPaths
+	} else {
+		gitCommon.repoPaths = MockRepoPaths(".git")
 	}
 
 	runner := deps.runner
@@ -45,9 +58,9 @@ func buildGitCommon(deps commonDeps) *GitCommon {
 	}
 	gitCommon.cmd = cmd
 
-	gitCommon.Common.UserConfig = deps.userConfig
-	if gitCommon.Common.UserConfig == nil {
-		gitCommon.Common.UserConfig = config.GetDefaultConfig()
+	gitCommon.Common.SetUserConfig(deps.userConfig)
+	if gitCommon.Common.UserConfig() == nil {
+		gitCommon.Common.SetUserConfig(config.GetDefaultConfig())
 	}
 
 	gitCommon.version = deps.gitVersion
@@ -81,11 +94,6 @@ func buildGitCommon(deps commonDeps) *GitCommon {
 		TempDir:      os.TempDir(),
 	})
 
-	gitCommon.dotGitDir = deps.dotGitDir
-	if gitCommon.dotGitDir == "" {
-		gitCommon.dotGitDir = ".git"
-	}
-
 	return gitCommon
 }
 
@@ -96,7 +104,7 @@ func buildRepo() *gogit.Repository {
 }
 
 func buildFileLoader(gitCommon *GitCommon) *FileLoader {
-	return NewFileLoader(gitCommon.Common, gitCommon.cmd, gitCommon.config)
+	return NewFileLoader(gitCommon, gitCommon.cmd, gitCommon.config)
 }
 
 func buildSubmoduleCommands(deps commonDeps) *SubmoduleCommands {
@@ -118,7 +126,7 @@ func buildWorkingTreeCommands(deps commonDeps) *WorkingTreeCommands {
 	return NewWorkingTreeCommands(gitCommon, submoduleCommands, fileLoader)
 }
 
-func buildPatchCommands(deps commonDeps) *PatchCommands {
+func buildPatchCommands(deps commonDeps) *PatchCommands { //nolint:golint,unused
 	gitCommon := buildGitCommon(deps)
 	rebaseCommands := buildRebaseCommands(deps)
 	commitCommands := buildCommitCommands(deps)
@@ -132,7 +140,7 @@ func buildPatchCommands(deps commonDeps) *PatchCommands {
 	return NewPatchCommands(gitCommon, rebaseCommands, commitCommands, statusCommands, stashCommands, patchBuilder)
 }
 
-func buildStatusCommands(deps commonDeps) *StatusCommands {
+func buildStatusCommands(deps commonDeps) *StatusCommands { //nolint:golint,unused
 	gitCommon := buildGitCommon(deps)
 
 	return NewStatusCommands(gitCommon)

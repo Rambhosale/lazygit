@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazygit/pkg/gui/style"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/jesseduffield/lazygit/pkg/utils"
 )
@@ -12,11 +13,11 @@ import (
 const HORIZONTAL_SCROLL_FACTOR = 3
 
 func (gui *Gui) scrollUpView(view *gocui.View) {
-	view.ScrollUp(gui.c.UserConfig.Gui.ScrollHeight)
+	view.ScrollUp(gui.c.UserConfig().Gui.ScrollHeight)
 }
 
 func (gui *Gui) scrollDownView(view *gocui.View) {
-	scrollHeight := gui.c.UserConfig.Gui.ScrollHeight
+	scrollHeight := gui.c.UserConfig().Gui.ScrollHeight
 	view.ScrollDown(scrollHeight)
 
 	if manager, ok := gui.viewBufferManagerMap[view.Name()]; ok {
@@ -26,7 +27,7 @@ func (gui *Gui) scrollDownView(view *gocui.View) {
 
 func (gui *Gui) scrollUpMain() error {
 	var view *gocui.View
-	if gui.c.CurrentContext().GetWindowName() == "secondary" {
+	if gui.c.Context().Current().GetWindowName() == "secondary" {
 		view = gui.secondaryView()
 	} else {
 		view = gui.mainView()
@@ -47,7 +48,7 @@ func (gui *Gui) scrollUpMain() error {
 
 func (gui *Gui) scrollDownMain() error {
 	var view *gocui.View
-	if gui.c.CurrentContext().GetWindowName() == "secondary" {
+	if gui.c.Context().Current().GetWindowName() == "secondary" {
 		view = gui.secondaryView()
 	} else {
 		view = gui.mainView()
@@ -109,8 +110,17 @@ func (gui *Gui) scrollDownConfirmationPanel() error {
 }
 
 func (gui *Gui) handleCopySelectedSideContextItemToClipboard() error {
+	return gui.handleCopySelectedSideContextItemToClipboardWithTruncation(-1)
+}
+
+func (gui *Gui) handleCopySelectedSideContextItemCommitHashToClipboard() error {
+	return gui.handleCopySelectedSideContextItemToClipboardWithTruncation(
+		gui.UserConfig().Git.TruncateCopiedCommitHashesTo)
+}
+
+func (gui *Gui) handleCopySelectedSideContextItemToClipboardWithTruncation(maxWidth int) error {
 	// important to note that this assumes we've selected an item in a side context
-	currentSideContext := gui.c.CurrentSideContext()
+	currentSideContext := gui.c.Context().CurrentSide()
 	if currentSideContext == nil {
 		return nil
 	}
@@ -126,9 +136,13 @@ func (gui *Gui) handleCopySelectedSideContextItemToClipboard() error {
 		return nil
 	}
 
+	if maxWidth > 0 {
+		itemId = itemId[:min(len(itemId), maxWidth)]
+	}
+
 	gui.c.LogAction(gui.c.Tr.Actions.CopyToClipboard)
 	if err := gui.os.CopyToClipboard(itemId); err != nil {
-		return gui.c.Error(err)
+		return err
 	}
 
 	truncatedItemId := utils.TruncateWithEllipsis(strings.Replace(itemId, "\n", " ", -1), 50)
@@ -136,4 +150,45 @@ func (gui *Gui) handleCopySelectedSideContextItemToClipboard() error {
 	gui.c.Toast(fmt.Sprintf("'%s' %s", truncatedItemId, gui.c.Tr.CopiedToClipboard))
 
 	return nil
+}
+
+func (gui *Gui) getCopySelectedSideContextItemToClipboardDisabledReason() *types.DisabledReason {
+	// important to note that this assumes we've selected an item in a side context
+	currentSideContext := gui.c.Context().CurrentSide()
+	if currentSideContext == nil {
+		// This should never happen but if it does we'll just ignore the keypress
+		return nil
+	}
+
+	listContext, ok := currentSideContext.(types.IListContext)
+	if !ok {
+		// This should never happen but if it does we'll just ignore the keypress
+		return nil
+	}
+
+	startIdx, endIdx := listContext.GetList().GetSelectionRange()
+	if startIdx != endIdx {
+		return &types.DisabledReason{Text: gui.Tr.RangeSelectNotSupported}
+	}
+
+	return nil
+}
+
+func (gui *Gui) setCaption(caption string) {
+	gui.Views.Options.FgColor = gocui.ColorWhite
+	gui.Views.Options.FgColor |= gocui.AttrBold
+	gui.Views.Options.SetContent(captionPrefix + " " + style.FgCyan.SetBold().Sprint(caption))
+	gui.c.Render()
+}
+
+var captionPrefix = ""
+
+func (gui *Gui) setCaptionPrefix(prefix string) {
+	gui.Views.Options.FgColor = gocui.ColorWhite
+	gui.Views.Options.FgColor |= gocui.AttrBold
+
+	captionPrefix = prefix
+
+	gui.Views.Options.SetContent(prefix)
+	gui.c.Render()
 }

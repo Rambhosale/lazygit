@@ -18,12 +18,17 @@ import (
 // this gives our integration test a way of interacting with the gui for sending keypresses
 // and reading state.
 type GuiDriver struct {
-	gui *Gui
+	gui        *Gui
+	isIdleChan chan struct{}
+	toastChan  chan string
+	headless   bool
 }
 
 var _ integrationTypes.GuiDriver = &GuiDriver{}
 
 func (self *GuiDriver) PressKey(keyStr string) {
+	self.CheckAllToastsAcknowledged()
+
 	key := keybindings.GetKey(keyStr)
 
 	var r rune
@@ -40,6 +45,34 @@ func (self *GuiDriver) PressKey(keyStr string) {
 		tcell.NewEventKey(tcellKey, r, tcell.ModNone),
 		0,
 	)
+
+	self.waitTillIdle()
+}
+
+func (self *GuiDriver) Click(x, y int) {
+	self.CheckAllToastsAcknowledged()
+
+	self.gui.g.ReplayedEvents.MouseEvents <- gocui.NewTcellMouseEventWrapper(
+		tcell.NewEventMouse(x, y, tcell.ButtonPrimary, 0),
+		0,
+	)
+	self.waitTillIdle()
+	self.gui.g.ReplayedEvents.MouseEvents <- gocui.NewTcellMouseEventWrapper(
+		tcell.NewEventMouse(x, y, tcell.ButtonNone, 0),
+		0,
+	)
+	self.waitTillIdle()
+}
+
+// wait until lazygit is idle (i.e. all processing is done) before continuing
+func (self *GuiDriver) waitTillIdle() {
+	<-self.isIdleChan
+}
+
+func (self *GuiDriver) CheckAllToastsAcknowledged() {
+	if t := self.NextToast(); t != nil {
+		self.Fail("Toast not acknowledged: " + *t)
+	}
 }
 
 func (self *GuiDriver) Keys() config.KeybindingConfig {
@@ -47,7 +80,7 @@ func (self *GuiDriver) Keys() config.KeybindingConfig {
 }
 
 func (self *GuiDriver) CurrentContext() types.Context {
-	return self.gui.c.CurrentContext()
+	return self.gui.c.Context().Current()
 }
 
 func (self *GuiDriver) ContextForView(viewName string) types.Context {
@@ -61,17 +94,28 @@ func (self *GuiDriver) ContextForView(viewName string) types.Context {
 
 func (self *GuiDriver) Fail(message string) {
 	currentView := self.gui.g.CurrentView()
+
+	// Check for unacknowledged toast: it may give us a hint as to why the test failed
+	toastMessage := ""
+	if t := self.NextToast(); t != nil {
+		toastMessage = fmt.Sprintf("Unacknowledged toast message: %s\n", *t)
+	}
+
 	fullMessage := fmt.Sprintf(
-		"%s\nFinal Lazygit state:\n%s\nUpon failure, focused view was '%s'.\nLog:\n%s", message,
+		"%s\nFinal Lazygit state:\n%s\nUpon failure, focused view was '%s'.\n%sLog:\n%s", message,
 		self.gui.g.Snapshot(),
 		currentView.Name(),
+		toastMessage,
 		strings.Join(self.gui.GuiLog, "\n"),
 	)
 
 	self.gui.g.Close()
 	// need to give the gui time to close
 	time.Sleep(time.Millisecond * 100)
-	fmt.Fprintln(os.Stderr, fullMessage)
+	_, err := fmt.Fprintln(os.Stderr, fullMessage)
+	if err != nil {
+		panic("Test failed. Failed writing to stderr")
+	}
 	panic("Test failed")
 }
 
@@ -103,4 +147,27 @@ func (self *GuiDriver) View(viewName string) *gocui.View {
 		panic(err)
 	}
 	return view
+}
+
+func (self *GuiDriver) SetCaption(caption string) {
+	self.gui.setCaption(caption)
+	self.waitTillIdle()
+}
+
+func (self *GuiDriver) SetCaptionPrefix(prefix string) {
+	self.gui.setCaptionPrefix(prefix)
+	self.waitTillIdle()
+}
+
+func (self *GuiDriver) NextToast() *string {
+	select {
+	case t := <-self.toastChan:
+		return &t
+	default:
+		return nil
+	}
+}
+
+func (self *GuiDriver) Headless() bool {
+	return self.headless
 }

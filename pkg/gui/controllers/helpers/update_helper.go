@@ -1,6 +1,9 @@
 package helpers
 
 import (
+	"errors"
+
+	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/jesseduffield/lazygit/pkg/updates"
 	"github.com/jesseduffield/lazygit/pkg/utils"
@@ -28,7 +31,7 @@ func (self *UpdateHelper) CheckForUpdateInBackground() {
 		if newVersion == "" {
 			return nil
 		}
-		if self.c.UserConfig.Update.Method == "background" {
+		if self.c.UserConfig().Update.Method == "background" {
 			self.startUpdating(newVersion)
 			return nil
 		}
@@ -37,13 +40,13 @@ func (self *UpdateHelper) CheckForUpdateInBackground() {
 }
 
 func (self *UpdateHelper) CheckForUpdateInForeground() error {
-	return self.c.WithWaitingStatus(self.c.Tr.CheckingForUpdates, func() error {
+	return self.c.WithWaitingStatus(self.c.Tr.CheckingForUpdates, func(gocui.Task) error {
 		self.updater.CheckForNewUpdate(func(newVersion string, err error) error {
 			if err != nil {
-				return self.c.Error(err)
+				return err
 			}
 			if newVersion == "" {
-				return self.c.ErrorMsg(self.c.Tr.FailedToRetrieveLatestVersionErr)
+				return errors.New(self.c.Tr.FailedToRetrieveLatestVersionErr)
 			}
 			return self.showUpdatePrompt(newVersion)
 		}, true)
@@ -53,7 +56,7 @@ func (self *UpdateHelper) CheckForUpdateInForeground() error {
 }
 
 func (self *UpdateHelper) startUpdating(newVersion string) {
-	_ = self.c.WithWaitingStatus(self.c.Tr.UpdateInProgressWaitingStatus, func() error {
+	_ = self.c.WithWaitingStatus(self.c.Tr.UpdateInProgressWaitingStatus, func(gocui.Task) error {
 		self.c.State().SetUpdating(true)
 		err := self.updater.Update(newVersion)
 		return self.onUpdateFinish(err)
@@ -70,9 +73,10 @@ func (self *UpdateHelper) onUpdateFinish(err error) error {
 					"errMessage": err.Error(),
 				},
 			)
-			return self.c.ErrorMsg(errMessage)
+			return errors.New(errMessage)
 		}
-		return self.c.Alert(self.c.Tr.UpdateCompletedTitle, self.c.Tr.UpdateCompleted)
+		self.c.Alert(self.c.Tr.UpdateCompletedTitle, self.c.Tr.UpdateCompleted)
+		return nil
 	})
 
 	return nil
@@ -85,7 +89,7 @@ func (self *UpdateHelper) showUpdatePrompt(newVersion string) error {
 		},
 	)
 
-	return self.c.Confirm(types.ConfirmOpts{
+	self.c.Confirm(types.ConfirmOpts{
 		Title:  self.c.Tr.UpdateAvailableTitle,
 		Prompt: message,
 		HandleConfirm: func() error {
@@ -93,4 +97,6 @@ func (self *UpdateHelper) showUpdatePrompt(newVersion string) error {
 			return nil
 		},
 	})
+
+	return nil
 }

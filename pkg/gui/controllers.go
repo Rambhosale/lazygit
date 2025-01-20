@@ -16,12 +16,22 @@ func (gui *Gui) Helpers() *helpers.Helpers {
 	return gui.helpers
 }
 
+// Note, the order of controllers determines the order in which keybindings appear
+// in the keybinding menu: the earlier that the controller is attached to a context,
+// the lower in the list the keybindings will appear.
 func (gui *Gui) resetHelpersAndControllers() {
+	for _, context := range gui.Contexts().Flatten() {
+		context.ClearAllBindingsFn()
+	}
+
 	helperCommon := gui.c
+	recordDirectoryHelper := helpers.NewRecordDirectoryHelper(helperCommon)
+	reposHelper := helpers.NewRecentReposHelper(helperCommon, recordDirectoryHelper, gui.onNewRepo)
 	refsHelper := helpers.NewRefsHelper(helperCommon)
+	suggestionsHelper := helpers.NewSuggestionsHelper(helperCommon)
+	worktreeHelper := helpers.NewWorktreeHelper(helperCommon, reposHelper, refsHelper, suggestionsHelper)
 
 	rebaseHelper := helpers.NewMergeAndRebaseHelper(helperCommon, refsHelper)
-	suggestionsHelper := helpers.NewSuggestionsHelper(helperCommon)
 
 	setCommitSummary := gui.getCommitMessageSetTextareaTextFn(func() *gocui.View { return gui.Views.CommitMessage })
 	setCommitDescription := gui.getCommitMessageSetTextareaTextFn(func() *gocui.View { return gui.Views.CommitDescription })
@@ -32,20 +42,34 @@ func (gui *Gui) resetHelpersAndControllers() {
 	getCommitDescription := func() string {
 		return strings.TrimSpace(gui.Views.CommitDescription.TextArea.GetContent())
 	}
+	getUnwrappedCommitDescription := func() string {
+		return strings.TrimSpace(gui.Views.CommitDescription.TextArea.GetUnwrappedContent())
+	}
 	commitsHelper := helpers.NewCommitsHelper(helperCommon,
 		getCommitSummary,
 		setCommitSummary,
 		getCommitDescription,
+		getUnwrappedCommitDescription,
 		setCommitDescription,
 	)
 
 	gpgHelper := helpers.NewGpgHelper(helperCommon)
 	viewHelper := helpers.NewViewHelper(helperCommon, gui.State.Contexts)
-	recordDirectoryHelper := helpers.NewRecordDirectoryHelper(helperCommon)
 	patchBuildingHelper := helpers.NewPatchBuildingHelper(helperCommon)
 	stagingHelper := helpers.NewStagingHelper(helperCommon)
 	mergeConflictsHelper := helpers.NewMergeConflictsHelper(helperCommon)
-	refreshHelper := helpers.NewRefreshHelper(helperCommon, refsHelper, rebaseHelper, patchBuildingHelper, stagingHelper, mergeConflictsHelper, gui.fileWatcher)
+	searchHelper := helpers.NewSearchHelper(helperCommon)
+
+	refreshHelper := helpers.NewRefreshHelper(
+		helperCommon,
+		refsHelper,
+		rebaseHelper,
+		patchBuildingHelper,
+		stagingHelper,
+		mergeConflictsHelper,
+		worktreeHelper,
+		searchHelper,
+	)
 	diffHelper := helpers.NewDiffHelper(helperCommon)
 	cherryPickHelper := helpers.NewCherryPickHelper(
 		helperCommon,
@@ -64,7 +88,15 @@ func (gui *Gui) resetHelpersAndControllers() {
 	appStatusHelper := helpers.NewAppStatusHelper(
 		helperCommon,
 		func() *status.StatusManager { return gui.statusManager },
+		modeHelper,
 	)
+
+	setSubCommits := func(commits []*models.Commit) {
+		gui.Mutexes.SubCommitsMutex.Lock()
+		defer gui.Mutexes.SubCommitsMutex.Unlock()
+
+		gui.State.Model.SubCommits = commits
+	}
 	gui.helpers = &helpers.Helpers{
 		Refs:            refsHelper,
 		Host:            helpers.NewHostHelper(helperCommon),
@@ -74,17 +106,19 @@ func (gui *Gui) resetHelpersAndControllers() {
 		Suggestions:     suggestionsHelper,
 		Files:           helpers.NewFilesHelper(helperCommon),
 		WorkingTree:     helpers.NewWorkingTreeHelper(helperCommon, refsHelper, commitsHelper, gpgHelper),
-		Tags:            helpers.NewTagsHelper(helperCommon),
+		Tags:            helpers.NewTagsHelper(helperCommon, commitsHelper),
+		BranchesHelper:  helpers.NewBranchesHelper(helperCommon, worktreeHelper),
 		GPG:             helpers.NewGpgHelper(helperCommon),
 		MergeAndRebase:  rebaseHelper,
 		MergeConflicts:  mergeConflictsHelper,
 		CherryPick:      cherryPickHelper,
 		Upstream:        helpers.NewUpstreamHelper(helperCommon, suggestionsHelper.GetRemoteBranchesSuggestionsFunc),
 		AmendHelper:     helpers.NewAmendHelper(helperCommon, gpgHelper),
+		FixupHelper:     helpers.NewFixupHelper(helperCommon),
 		Commits:         commitsHelper,
 		Snake:           helpers.NewSnakeHelper(helperCommon),
 		Diff:            diffHelper,
-		Repos:           helpers.NewRecentReposHelper(helperCommon, recordDirectoryHelper, gui.onNewRepo),
+		Repos:           reposHelper,
 		RecordDirectory: recordDirectoryHelper,
 		Update:          helpers.NewUpdateHelper(helperCommon, gui.Updater),
 		Window:          windowHelper,
@@ -93,13 +127,16 @@ func (gui *Gui) resetHelpersAndControllers() {
 		Confirmation:    helpers.NewConfirmationHelper(helperCommon),
 		Mode:            modeHelper,
 		AppStatus:       appStatusHelper,
+		InlineStatus:    helpers.NewInlineStatusHelper(helperCommon, windowHelper),
 		WindowArrangement: helpers.NewWindowArrangementHelper(
 			gui.c,
 			windowHelper,
 			modeHelper,
 			appStatusHelper,
 		),
-		Search: helpers.NewSearchHelper(helperCommon),
+		Search:     searchHelper,
+		Worktree:   worktreeHelper,
+		SubCommits: helpers.NewSubCommitsHelper(helperCommon, refreshHelper, setSubCommits),
 	}
 
 	gui.CustomCommandsClient = custom_commands.NewClient(
@@ -138,14 +175,15 @@ func (gui *Gui) resetHelpersAndControllers() {
 		common,
 		func(branches []*models.RemoteBranch) { gui.State.Model.RemoteBranches = branches },
 	)
+	worktreesController := controllers.NewWorktreesController(common)
 	undoController := controllers.NewUndoController(common)
 	globalController := controllers.NewGlobalController(common)
 	contextLinesController := controllers.NewContextLinesController(common)
+	renameSimilarityThresholdController := controllers.NewRenameSimilarityThresholdController(common)
 	verticalScrollControllerFactory := controllers.NewVerticalScrollControllerFactory(common, &gui.viewBufferManagerMap)
 
 	branchesController := controllers.NewBranchesController(common)
 	gitFlowController := controllers.NewGitFlowController(common)
-	filesRemoveController := controllers.NewFilesRemoveController(common)
 	stashController := controllers.NewStashController(common)
 	commitFilesController := controllers.NewCommitFilesController(common)
 	patchExplorerControllerFactory := controllers.NewPatchExplorerControllerFactory(common)
@@ -159,7 +197,7 @@ func (gui *Gui) resetHelpersAndControllers() {
 	commandLogController := controllers.NewCommandLogController(common)
 	confirmationController := controllers.NewConfirmationController(common)
 	suggestionsController := controllers.NewSuggestionsController(common)
-	jumpToSideWindowController := controllers.NewJumpToSideWindowController(common)
+	jumpToSideWindowController := controllers.NewJumpToSideWindowController(common, gui.handleNextTab)
 
 	sideWindowControllerFactory := controllers.NewSideWindowControllerFactory(common)
 
@@ -173,10 +211,23 @@ func (gui *Gui) resetHelpersAndControllers() {
 		controllers.AttachControllers(context, searchControllerFactory.Create(context))
 	}
 
+	for _, context := range []controllers.CanViewWorktreeOptions{
+		gui.State.Contexts.LocalCommits,
+		gui.State.Contexts.ReflogCommits,
+		gui.State.Contexts.SubCommits,
+		gui.State.Contexts.Stash,
+		gui.State.Contexts.Branches,
+		gui.State.Contexts.RemoteBranches,
+		gui.State.Contexts.Tags,
+	} {
+		controllers.AttachControllers(context, controllers.NewWorktreeOptionsController(common, context))
+	}
+
 	// allow for navigating between side window contexts
 	for _, context := range []types.Context{
 		gui.State.Contexts.Status,
 		gui.State.Contexts.Remotes,
+		gui.State.Contexts.Worktrees,
 		gui.State.Contexts.Tags,
 		gui.State.Contexts.Branches,
 		gui.State.Contexts.RemoteBranches,
@@ -191,13 +242,6 @@ func (gui *Gui) resetHelpersAndControllers() {
 		controllers.AttachControllers(context, sideWindowControllerFactory.Create(context))
 	}
 
-	setSubCommits := func(commits []*models.Commit) {
-		gui.Mutexes.SubCommitsMutex.Lock()
-		defer gui.Mutexes.SubCommitsMutex.Unlock()
-
-		gui.State.Model.SubCommits = commits
-	}
-
 	for _, context := range []controllers.CanSwitchToSubCommits{
 		gui.State.Contexts.Branches,
 		gui.State.Contexts.RemoteBranches,
@@ -205,7 +249,7 @@ func (gui *Gui) resetHelpersAndControllers() {
 		gui.State.Contexts.ReflogCommits,
 	} {
 		controllers.AttachControllers(context, controllers.NewSwitchToSubCommitsController(
-			common, setSubCommits, context,
+			common, context,
 		))
 	}
 
@@ -215,7 +259,7 @@ func (gui *Gui) resetHelpersAndControllers() {
 		gui.State.Contexts.Stash,
 	} {
 		controllers.AttachControllers(context, controllers.NewSwitchToDiffFilesController(
-			common, context, gui.State.Contexts.CommitFiles,
+			common, context,
 		))
 	}
 
@@ -255,7 +299,7 @@ func (gui *Gui) resetHelpersAndControllers() {
 	)
 
 	controllers.AttachControllers(gui.State.Contexts.CustomPatchBuilderSecondary,
-		verticalScrollControllerFactory.Create(gui.State.Contexts.CustomPatchBuilder),
+		verticalScrollControllerFactory.Create(gui.State.Contexts.CustomPatchBuilderSecondary),
 	)
 
 	controllers.AttachControllers(gui.State.Contexts.MergeConflicts,
@@ -264,7 +308,6 @@ func (gui *Gui) resetHelpersAndControllers() {
 
 	controllers.AttachControllers(gui.State.Contexts.Files,
 		filesController,
-		filesRemoveController,
 	)
 
 	controllers.AttachControllers(gui.State.Contexts.Tags,
@@ -273,11 +316,6 @@ func (gui *Gui) resetHelpersAndControllers() {
 
 	controllers.AttachControllers(gui.State.Contexts.Submodules,
 		submodulesController,
-	)
-
-	controllers.AttachControllers(gui.State.Contexts.LocalCommits,
-		localCommitsController,
-		bisectController,
 	)
 
 	controllers.AttachControllers(gui.State.Contexts.Branches,
@@ -298,6 +336,10 @@ func (gui *Gui) resetHelpersAndControllers() {
 		remotesController,
 	)
 
+	controllers.AttachControllers(gui.State.Contexts.Worktrees,
+		worktreesController,
+	)
+
 	controllers.AttachControllers(gui.State.Contexts.Stash,
 		stashController,
 	)
@@ -312,6 +354,7 @@ func (gui *Gui) resetHelpersAndControllers() {
 
 	controllers.AttachControllers(gui.State.Contexts.CommitDescription,
 		commitDescriptionController,
+		verticalScrollControllerFactory.Create(gui.State.Contexts.CommitDescription),
 	)
 
 	controllers.AttachControllers(gui.State.Contexts.RemoteBranches,
@@ -339,11 +382,12 @@ func (gui *Gui) resetHelpersAndControllers() {
 	)
 
 	controllers.AttachControllers(gui.State.Contexts.Global,
-		syncController,
 		undoController,
 		globalController,
 		contextLinesController,
+		renameSimilarityThresholdController,
 		jumpToSideWindowController,
+		syncController,
 	)
 
 	controllers.AttachControllers(gui.State.Contexts.Snake,
@@ -363,7 +407,6 @@ func (gui *Gui) getCommitMessageSetTextareaTextFn(getView func() *gocui.View) fu
 		view := getView()
 		view.ClearTextArea()
 		view.TextArea.TypeString(text)
-		gui.helpers.Confirmation.ResizeCommitMessagePanels()
 		view.RenderTextArea()
 	}
 }

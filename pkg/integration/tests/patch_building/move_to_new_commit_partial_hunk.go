@@ -40,12 +40,25 @@ var MoveToNewCommitPartialHunk = NewIntegrationTest(NewIntegrationTestArgs{
 
 		t.Views().PatchBuilding().
 			IsFocused().
-			PressEnter().
 			PressPrimaryAction()
 
 		t.Views().Information().Content(Contains("Building patch"))
 
 		t.Common().SelectPatchOption(Contains("Move patch into new commit"))
+
+		t.ExpectPopup().CommitMessagePanel().
+			InitialText(Equals("")).
+			Type("new commit").Confirm()
+
+		t.Views().Commits().
+			IsFocused().
+			Lines(
+				Contains("third commit"),
+				Contains("new commit").IsSelected(),
+				Contains("commit to move from"),
+				Contains("first commit"),
+			).
+			PressEnter()
 
 		t.Views().CommitFiles().
 			IsFocused().
@@ -62,7 +75,7 @@ var MoveToNewCommitPartialHunk = NewIntegrationTest(NewIntegrationTestArgs{
 			IsFocused().
 			Lines(
 				Contains("third commit"),
-				Contains(`Split from "commit to move from"`).IsSelected(),
+				Contains("new commit").IsSelected(),
 				Contains("commit to move from"),
 				Contains("first commit"),
 			).

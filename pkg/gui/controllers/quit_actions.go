@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazygit/pkg/gui/context"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 )
 
@@ -24,31 +25,43 @@ func (self *QuitActions) quitAux() error {
 		return self.confirmQuitDuringUpdate()
 	}
 
-	if self.c.UserConfig.ConfirmOnQuit {
-		return self.c.Confirm(types.ConfirmOpts{
+	if self.c.UserConfig().ConfirmOnQuit {
+		self.c.Confirm(types.ConfirmOpts{
 			Title:  "",
 			Prompt: self.c.Tr.ConfirmQuit,
 			HandleConfirm: func() error {
 				return gocui.ErrQuit
 			},
 		})
+
+		return nil
 	}
 
 	return gocui.ErrQuit
 }
 
 func (self *QuitActions) confirmQuitDuringUpdate() error {
-	return self.c.Confirm(types.ConfirmOpts{
+	self.c.Confirm(types.ConfirmOpts{
 		Title:  self.c.Tr.ConfirmQuitDuringUpdateTitle,
 		Prompt: self.c.Tr.ConfirmQuitDuringUpdate,
 		HandleConfirm: func() error {
 			return gocui.ErrQuit
 		},
 	})
+
+	return nil
 }
 
 func (self *QuitActions) Escape() error {
-	currentContext := self.c.CurrentContext()
+	currentContext := self.c.Context().Current()
+
+	if listContext, ok := currentContext.(types.IListContext); ok {
+		if listContext.GetList().IsSelectingRange() {
+			listContext.GetList().CancelRangeSelect()
+			self.c.PostRefreshUpdate(listContext)
+			return nil
+		}
+	}
 
 	switch ctx := currentContext.(type) {
 	case types.IFilterableContext:
@@ -63,10 +76,11 @@ func (self *QuitActions) Escape() error {
 		}
 	}
 
-	parentContext, hasParent := currentContext.GetParentContext()
-	if hasParent && currentContext != nil && parentContext != nil {
+	parentContext := currentContext.GetParentContext()
+	if parentContext != nil {
 		// TODO: think about whether this should be marked as a return rather than adding to the stack
-		return self.c.PushContext(parentContext)
+		self.c.Context().Push(parentContext)
+		return nil
 	}
 
 	for _, mode := range self.c.Helpers().Mode.Statuses() {
@@ -77,10 +91,10 @@ func (self *QuitActions) Escape() error {
 
 	repoPathStack := self.c.State().GetRepoPathStack()
 	if !repoPathStack.IsEmpty() {
-		return self.c.Helpers().Repos.DispatchSwitchToRepo(repoPathStack.Pop(), true)
+		return self.c.Helpers().Repos.DispatchSwitchToRepo(repoPathStack.Pop(), context.NO_CONTEXT)
 	}
 
-	if self.c.UserConfig.QuitOnTopLevelReturn {
+	if self.c.UserConfig().QuitOnTopLevelReturn {
 		return self.Quit()
 	}
 

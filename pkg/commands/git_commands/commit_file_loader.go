@@ -3,7 +3,6 @@ package git_commands
 import (
 	"strings"
 
-	"github.com/jesseduffield/generics/slices"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
 	"github.com/jesseduffield/lazygit/pkg/common"
@@ -25,6 +24,7 @@ func NewCommitFileLoader(common *common.Common, cmd oscommands.ICmdObjBuilder) *
 // GetFilesInDiff get the specified commit files
 func (self *CommitFileLoader) GetFilesInDiff(from string, to string, reverse bool) ([]*models.CommitFile, error) {
 	cmdArgs := NewGitCmd("diff").
+		Config("diff.noprefix=false").
 		Arg("--submodule").
 		Arg("--no-ext-diff").
 		Arg("--name-status").
@@ -52,7 +52,7 @@ func getCommitFilesFromFilenames(filenames string) []*models.CommitFile {
 	}
 
 	// typical result looks like 'A my_file' meaning my_file was added
-	return slices.Map(lo.Chunk(lines, 2), func(chunk []string) *models.CommitFile {
+	return lo.Map(lo.Chunk(lines, 2), func(chunk []string, _ int) *models.CommitFile {
 		return &models.CommitFile{
 			ChangeStatus: chunk[0],
 			Name:         chunk[1],

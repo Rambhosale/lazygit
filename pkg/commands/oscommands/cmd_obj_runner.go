@@ -6,8 +6,10 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/go-errors/errors"
+	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/utils"
 	"github.com/sirupsen/logrus"
 )
@@ -18,15 +20,6 @@ type ICmdObjRunner interface {
 	RunWithOutputs(cmdObj ICmdObj) (string, string, error)
 	RunAndProcessLines(cmdObj ICmdObj, onLine func(line string) (bool, error)) error
 }
-
-type CredentialType int
-
-const (
-	Password CredentialType = iota
-	Username
-	Passphrase
-	PIN
-)
 
 type cmdObjRunner struct {
 	log   *logrus.Entry
@@ -110,10 +103,14 @@ func (self *cmdObjRunner) RunWithOutputAux(cmdObj ICmdObj) (string, error) {
 		self.logCmdObj(cmdObj)
 	}
 
+	t := time.Now()
 	output, err := sanitisedCommandOutput(cmdObj.GetCmd().CombinedOutput())
 	if err != nil {
 		self.log.WithField("command", cmdObj.ToString()).Error(output)
 	}
+
+	self.log.Infof("%s (%s)", cmdObj.ToString(), time.Since(t))
+
 	return output, err
 }
 
@@ -124,11 +121,14 @@ func (self *cmdObjRunner) RunWithOutputsAux(cmdObj ICmdObj) (string, string, err
 		self.logCmdObj(cmdObj)
 	}
 
+	t := time.Now()
 	var outBuffer, errBuffer bytes.Buffer
 	cmd := cmdObj.GetCmd()
 	cmd.Stdout = &outBuffer
 	cmd.Stderr = &errBuffer
 	err := cmd.Run()
+
+	self.log.Infof("%s (%s)", cmdObj.ToString(), time.Since(t))
 
 	stdout := outBuffer.String()
 	stderr, err := sanitisedCommandOutput(errBuffer.Bytes(), err)
@@ -152,6 +152,7 @@ func (self *cmdObjRunner) RunAndProcessLines(cmdObj ICmdObj, onLine func(line st
 	if cmdObj.ShouldLog() {
 		self.logCmdObj(cmdObj)
 	}
+	t := time.Now()
 
 	cmd := cmdObj.GetCmd()
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -160,7 +161,7 @@ func (self *cmdObjRunner) RunAndProcessLines(cmdObj ICmdObj, onLine func(line st
 	}
 
 	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Split(bufio.ScanLines)
+	scanner.Split(utils.ScanLinesAndTruncateWhenLongerThanBuffer(bufio.MaxScanTokenSize))
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -177,29 +178,16 @@ func (self *cmdObjRunner) RunAndProcessLines(cmdObj ICmdObj, onLine func(line st
 		}
 	}
 
-	_ = cmd.Wait()
-
-	return nil
-}
-
-// Whenever we're asked for a password we just enter a newline, which will
-// eventually cause the command to fail.
-var failPromptFn = func(CredentialType) string { return "\n" }
-
-func (self *cmdObjRunner) runWithCredentialHandling(cmdObj ICmdObj) error {
-	var promptFn func(CredentialType) string
-
-	switch cmdObj.GetCredentialStrategy() {
-	case PROMPT:
-		promptFn = self.guiIO.promptForCredentialFn
-	case FAIL:
-		promptFn = failPromptFn
-	case NONE:
-		// we should never land here
-		return errors.New("runWithCredentialHandling called but cmdObj does not have a credential strategy")
+	if scanner.Err() != nil {
+		_ = Kill(cmd)
+		return scanner.Err()
 	}
 
-	return self.runAndDetectCredentialRequest(cmdObj, promptFn)
+	_ = cmd.Wait()
+
+	self.log.Infof("%s (%s)", cmdObj.ToString(), time.Since(t))
+
+	return nil
 }
 
 func (self *cmdObjRunner) logCmdObj(cmdObj ICmdObj) {
@@ -233,32 +221,10 @@ func (self *cmdObjRunner) runAndStream(cmdObj ICmdObj) error {
 	})
 }
 
-// runAndDetectCredentialRequest detect a username / password / passphrase question in a command
-// promptUserForCredential is a function that gets executed when this function detect you need to fillin a password or passphrase
-// The promptUserForCredential argument will be "username", "password" or "passphrase" and expects the user's password/passphrase or username back
-func (self *cmdObjRunner) runAndDetectCredentialRequest(
-	cmdObj ICmdObj,
-	promptUserForCredential func(CredentialType) string,
-) error {
-	// setting the output to english so we can parse it for a username/password request
-	cmdObj.AddEnvVars("LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
-
-	return self.runAndStreamAux(cmdObj, func(handler *cmdHandler, cmdWriter io.Writer) {
-		tr := io.TeeReader(handler.stdoutPipe, cmdWriter)
-
-		go utils.Safe(func() {
-			self.processOutput(tr, handler.stdinPipe, promptUserForCredential)
-		})
-	})
-}
-
 func (self *cmdObjRunner) runAndStreamAux(
 	cmdObj ICmdObj,
 	onRun func(*cmdHandler, io.Writer),
 ) error {
-	// if we're streaming this we don't want any fancy terminal stuff
-	cmdObj.AddEnvVars("TERM=dumb")
-
 	cmdWriter := self.guiIO.newCmdWriterFn()
 
 	if cmdObj.ShouldLog() {
@@ -284,9 +250,14 @@ func (self *cmdObjRunner) runAndStreamAux(
 		}
 	}()
 
+	t := time.Now()
+
 	onRun(handler, cmdWriter)
 
 	err = cmd.Wait()
+
+	self.log.Infof("%s (%s)", cmdObj.ToString(), time.Since(t))
+
 	if err != nil {
 		errStr := stderr.String()
 		if errStr != "" {
@@ -296,13 +267,82 @@ func (self *cmdObjRunner) runAndStreamAux(
 		if cmdObj.ShouldIgnoreEmptyError() {
 			return nil
 		}
-		return errors.New(stdout.String())
+		stdoutStr := stdout.String()
+		if stdoutStr != "" {
+			return errors.New(stdoutStr)
+		}
+		return errors.New("Command exited with non-zero exit code, but no output")
 	}
 
 	return nil
 }
 
-func (self *cmdObjRunner) processOutput(reader io.Reader, writer io.Writer, promptUserForCredential func(CredentialType) string) {
+type CredentialType int
+
+const (
+	Password CredentialType = iota
+	Username
+	Passphrase
+	PIN
+	Token
+)
+
+// Whenever we're asked for a password we just enter a newline, which will
+// eventually cause the command to fail.
+var failPromptFn = func(CredentialType) <-chan string {
+	ch := make(chan string)
+	go func() {
+		ch <- "\n"
+	}()
+	return ch
+}
+
+func (self *cmdObjRunner) runWithCredentialHandling(cmdObj ICmdObj) error {
+	promptFn, err := self.getCredentialPromptFn(cmdObj)
+	if err != nil {
+		return err
+	}
+
+	return self.runAndDetectCredentialRequest(cmdObj, promptFn)
+}
+
+func (self *cmdObjRunner) getCredentialPromptFn(cmdObj ICmdObj) (func(CredentialType) <-chan string, error) {
+	switch cmdObj.GetCredentialStrategy() {
+	case PROMPT:
+		return self.guiIO.promptForCredentialFn, nil
+	case FAIL:
+		return failPromptFn, nil
+	default:
+		// we should never land here
+		return nil, errors.New("runWithCredentialHandling called but cmdObj does not have a credential strategy")
+	}
+}
+
+// runAndDetectCredentialRequest detect a username / password / passphrase question in a command
+// promptUserForCredential is a function that gets executed when this function detect you need to fill in a password or passphrase
+// The promptUserForCredential argument will be "username", "password" or "passphrase" and expects the user's password/passphrase or username back
+func (self *cmdObjRunner) runAndDetectCredentialRequest(
+	cmdObj ICmdObj,
+	promptUserForCredential func(CredentialType) <-chan string,
+) error {
+	// setting the output to english so we can parse it for a username/password request
+	cmdObj.AddEnvVars("LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
+
+	return self.runAndStreamAux(cmdObj, func(handler *cmdHandler, cmdWriter io.Writer) {
+		tr := io.TeeReader(handler.stdoutPipe, cmdWriter)
+
+		go utils.Safe(func() {
+			self.processOutput(tr, handler.stdinPipe, promptUserForCredential, cmdObj.GetTask())
+		})
+	})
+}
+
+func (self *cmdObjRunner) processOutput(
+	reader io.Reader,
+	writer io.Writer,
+	promptUserForCredential func(CredentialType) <-chan string,
+	task gocui.Task,
+) {
 	checkForCredentialRequest := self.getCheckForCredentialRequestFunc()
 
 	scanner := bufio.NewScanner(reader)
@@ -311,7 +351,14 @@ func (self *cmdObjRunner) processOutput(reader io.Reader, writer io.Writer, prom
 		newBytes := scanner.Bytes()
 		askFor, ok := checkForCredentialRequest(newBytes)
 		if ok {
-			toInput := promptUserForCredential(askFor)
+			responseChan := promptUserForCredential(askFor)
+			if task != nil {
+				task.Pause()
+			}
+			toInput := <-responseChan
+			if task != nil {
+				task.Continue()
+			}
 			// If the return data is empty we don't write anything to stdin
 			if toInput != "" {
 				_, _ = writer.Write([]byte(toInput))
@@ -330,6 +377,7 @@ func (self *cmdObjRunner) getCheckForCredentialRequestFunc() func([]byte) (Crede
 		`Username\s*for\s*'.+':`:                 Username,
 		`Enter\s*passphrase\s*for\s*key\s*'.+':`: Passphrase,
 		`Enter\s*PIN\s*for\s*.+\s*key\s*.+:`:     PIN,
+		`.*2FA Token.*`:                          Token,
 	}
 
 	compiledPrompts := map[*regexp.Regexp]CredentialType{}

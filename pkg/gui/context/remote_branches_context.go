@@ -4,6 +4,7 @@ import (
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/gui/presentation"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
+	"github.com/samber/lo"
 )
 
 type RemoteBranchesContext struct {
@@ -27,7 +28,7 @@ func NewRemoteBranchesContext(
 		},
 	)
 
-	getDisplayStrings := func(startIdx int, length int) [][]string {
+	getDisplayStrings := func(_ int, _ int) [][]string {
 		return presentation.GetRemoteBranchListDisplayStrings(viewModel.GetItems(), c.Modes().Diffing.Ref)
 	}
 
@@ -36,27 +37,21 @@ func NewRemoteBranchesContext(
 		DynamicTitleBuilder:   NewDynamicTitleBuilder(c.Tr.RemoteBranchesDynamicTitle),
 		ListContextTrait: &ListContextTrait{
 			Context: NewSimpleContext(NewBaseContext(NewBaseContextOpts{
-				View:       c.Views().RemoteBranches,
-				WindowName: "branches",
-				Key:        REMOTE_BRANCHES_CONTEXT_KEY,
-				Kind:       types.SIDE_CONTEXT,
-				Focusable:  true,
-				Transient:  true,
+				View:                        c.Views().RemoteBranches,
+				WindowName:                  "branches",
+				Key:                         REMOTE_BRANCHES_CONTEXT_KEY,
+				Kind:                        types.SIDE_CONTEXT,
+				Focusable:                   true,
+				Transient:                   true,
+				NeedsRerenderOnHeightChange: true,
 			})),
-			list:              viewModel,
-			getDisplayStrings: getDisplayStrings,
-			c:                 c,
+			ListRenderer: ListRenderer{
+				list:              viewModel,
+				getDisplayStrings: getDisplayStrings,
+			},
+			c: c,
 		},
 	}
-}
-
-func (self *RemoteBranchesContext) GetSelectedItemId() string {
-	item := self.GetSelected()
-	if item == nil {
-		return ""
-	}
-
-	return item.ID()
 }
 
 func (self *RemoteBranchesContext) GetSelectedRef() types.Ref {
@@ -67,8 +62,26 @@ func (self *RemoteBranchesContext) GetSelectedRef() types.Ref {
 	return remoteBranch
 }
 
+func (self *RemoteBranchesContext) GetSelectedRefs() ([]types.Ref, int, int) {
+	items, startIdx, endIdx := self.GetSelectedItems()
+
+	refs := lo.Map(items, func(item *models.RemoteBranch, _ int) types.Ref {
+		return item
+	})
+
+	return refs, startIdx, endIdx
+}
+
 func (self *RemoteBranchesContext) GetDiffTerminals() []string {
 	itemId := self.GetSelectedItemId()
 
 	return []string{itemId}
+}
+
+func (self *RemoteBranchesContext) RefForAdjustingLineNumberInDiff() string {
+	return self.GetSelectedItemId()
+}
+
+func (self *RemoteBranchesContext) ShowBranchHeadsInSubCommits() bool {
+	return true
 }

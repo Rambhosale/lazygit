@@ -16,11 +16,11 @@ func (gui *Gui) handleEditorKeypress(textArea *gocui.TextArea, key gocui.Key, ch
 		textArea.MoveCursorDown()
 	case key == gocui.KeyArrowUp:
 		textArea.MoveCursorUp()
-	case key == gocui.KeyArrowLeft && (mod&gocui.ModAlt) != 0:
+	case (key == gocui.KeyArrowLeft || ch == 'b') && (mod&gocui.ModAlt) != 0:
 		textArea.MoveLeftWord()
 	case key == gocui.KeyArrowLeft || key == gocui.KeyCtrlB:
 		textArea.MoveCursorLeft()
-	case key == gocui.KeyArrowRight && (mod&gocui.ModAlt) != 0:
+	case (key == gocui.KeyArrowRight || ch == 'f') && (mod&gocui.ModAlt) != 0:
 		textArea.MoveRightWord()
 	case key == gocui.KeyArrowRight || key == gocui.KeyCtrlF:
 		textArea.MoveCursorRight()
@@ -47,8 +47,7 @@ func (gui *Gui) handleEditorKeypress(textArea *gocui.TextArea, key gocui.Key, ch
 	case key == gocui.KeyCtrlY:
 		textArea.Yank()
 
-		// TODO: see if we need all three of these conditions: maybe the final one is sufficient
-	case ch != 0 && mod == 0 && unicode.IsPrint(ch):
+	case unicode.IsPrint(ch):
 		textArea.TypeRune(ch)
 	default:
 		return false

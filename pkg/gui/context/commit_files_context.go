@@ -1,12 +1,16 @@
 package context
 
 import (
-	"github.com/jesseduffield/generics/slices"
+	"fmt"
+
+	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/gui/filetree"
 	"github.com/jesseduffield/lazygit/pkg/gui/presentation"
+	"github.com/jesseduffield/lazygit/pkg/gui/presentation/icons"
 	"github.com/jesseduffield/lazygit/pkg/gui/style"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
+	"github.com/samber/lo"
 )
 
 type CommitFilesContext struct {
@@ -17,24 +21,26 @@ type CommitFilesContext struct {
 }
 
 var (
-	_ types.IListContext    = (*CommitFilesContext)(nil)
-	_ types.DiffableContext = (*CommitFilesContext)(nil)
+	_ types.IListContext       = (*CommitFilesContext)(nil)
+	_ types.DiffableContext    = (*CommitFilesContext)(nil)
+	_ types.ISearchableContext = (*CommitFilesContext)(nil)
 )
 
 func NewCommitFilesContext(c *ContextCommon) *CommitFilesContext {
 	viewModel := filetree.NewCommitFileTreeViewModel(
 		func() []*models.CommitFile { return c.Model().CommitFiles },
 		c.Log,
-		c.UserConfig.Gui.ShowFileTree,
+		c.UserConfig().Gui.ShowFileTree,
 	)
 
-	getDisplayStrings := func(startIdx int, length int) [][]string {
+	getDisplayStrings := func(_ int, _ int) [][]string {
 		if viewModel.Len() == 0 {
 			return [][]string{{style.FgRed.Sprint("(none)")}}
 		}
 
-		lines := presentation.RenderCommitFileTree(viewModel, c.Modes().Diffing.Ref, c.Git().Patch.PatchBuilder)
-		return slices.Map(lines, func(line string) []string {
+		showFileIcons := icons.IsIconEnabled() && c.UserConfig().Gui.ShowFileIcons
+		lines := presentation.RenderCommitFileTree(viewModel, c.Git().Patch.PatchBuilder, showFileIcons)
+		return lo.Map(lines, func(line string, _ int) []string {
 			return []string{line}
 		})
 	}
@@ -54,29 +60,49 @@ func NewCommitFilesContext(c *ContextCommon) *CommitFilesContext {
 					Transient:  true,
 				}),
 			),
-			list:              viewModel,
-			getDisplayStrings: getDisplayStrings,
-			c:                 c,
+			ListRenderer: ListRenderer{
+				list:              viewModel,
+				getDisplayStrings: getDisplayStrings,
+			},
+			c: c,
 		},
 	}
 
-	ctx.GetView().SetOnSelectItem(ctx.SearchTrait.onSelectItemWrapper(func(selectedLineIdx int) error {
-		ctx.GetList().SetSelectedLineIdx(selectedLineIdx)
-		return ctx.HandleFocus(types.OnFocusOpts{})
-	}))
+	ctx.GetView().SetOnSelectItem(ctx.SearchTrait.onSelectItemWrapper(ctx.OnSearchSelect))
 
 	return ctx
 }
 
-func (self *CommitFilesContext) GetSelectedItemId() string {
-	item := self.GetSelected()
-	if item == nil {
-		return ""
-	}
-
-	return item.ID()
-}
-
 func (self *CommitFilesContext) GetDiffTerminals() []string {
 	return []string{self.GetRef().RefName()}
+}
+
+func (self *CommitFilesContext) RefForAdjustingLineNumberInDiff() string {
+	if refs := self.GetRefRange(); refs != nil {
+		return refs.To.RefName()
+	}
+	return self.GetRef().RefName()
+}
+
+func (self *CommitFilesContext) GetFromAndToForDiff() (string, string) {
+	if refs := self.GetRefRange(); refs != nil {
+		return refs.From.ParentRefName(), refs.To.RefName()
+	}
+	ref := self.GetRef()
+	return ref.ParentRefName(), ref.RefName()
+}
+
+func (self *CommitFilesContext) ModelSearchResults(searchStr string, caseSensitive bool) []gocui.SearchPosition {
+	return nil
+}
+
+func (self *CommitFilesContext) ReInit(ref types.Ref, refRange *types.RefRange) {
+	self.SetRef(ref)
+	self.SetRefRange(refRange)
+	if refRange != nil {
+		self.SetTitleRef(fmt.Sprintf("%s-%s", refRange.From.ShortRefName(), refRange.To.ShortRefName()))
+	} else {
+		self.SetTitleRef(ref.Description())
+	}
+	self.GetView().Title = self.Title()
 }

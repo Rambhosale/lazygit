@@ -1,10 +1,10 @@
 package gui
 
 import (
-	"github.com/jesseduffield/lazygit/pkg/gui/presentation"
+	"fmt"
+
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/jesseduffield/lazygit/pkg/theme"
-	"github.com/jesseduffield/lazygit/pkg/utils"
 )
 
 // note: items option is mutated by this function
@@ -27,10 +27,10 @@ func (gui *Gui) createMenu(opts types.CreateMenuOptions) error {
 		}
 
 		if item.OpensMenu {
-			item.LabelColumns[0] = presentation.OpensMenuStyle(item.LabelColumns[0])
+			item.LabelColumns[0] = fmt.Sprintf("%s...", item.LabelColumns[0])
 		}
 
-		maxColumnSize = utils.Max(maxColumnSize, len(item.LabelColumns))
+		maxColumnSize = max(maxColumnSize, len(item.LabelColumns))
 	}
 
 	for _, item := range opts.Items {
@@ -41,8 +41,9 @@ func (gui *Gui) createMenu(opts types.CreateMenuOptions) error {
 		}
 	}
 
-	gui.State.Contexts.Menu.SetMenuItems(opts.Items)
-	gui.State.Contexts.Menu.SetSelectedLineIdx(0)
+	gui.State.Contexts.Menu.SetMenuItems(opts.Items, opts.ColumnAlignment)
+	gui.State.Contexts.Menu.SetPrompt(opts.Prompt)
+	gui.State.Contexts.Menu.SetSelection(0)
 
 	gui.Views.Menu.Title = opts.Title
 	gui.Views.Menu.FgColor = theme.GocuiDefaultTextColor
@@ -56,8 +57,9 @@ func (gui *Gui) createMenu(opts types.CreateMenuOptions) error {
 		return err
 	}
 
-	_ = gui.c.PostRefreshUpdate(gui.State.Contexts.Menu)
+	gui.c.PostRefreshUpdate(gui.State.Contexts.Menu)
 
 	// TODO: ensure that if we're opened a menu from within a menu that it renders correctly
-	return gui.c.PushContext(gui.State.Contexts.Menu)
+	gui.c.Context().Push(gui.State.Contexts.Menu)
+	return nil
 }

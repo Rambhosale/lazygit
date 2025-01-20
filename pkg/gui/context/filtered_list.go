@@ -1,7 +1,11 @@
 package context
 
 import (
+	"strings"
+
 	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/sahilm/fuzzy"
+	"github.com/samber/lo"
 	"github.com/sasha-s/go-deadlock"
 )
 
@@ -27,14 +31,18 @@ func (self *FilteredList[T]) GetFilter() string {
 	return self.filter
 }
 
-func (self *FilteredList[T]) SetFilter(filter string) {
+func (self *FilteredList[T]) SetFilter(filter string, useFuzzySearch bool) {
 	self.filter = filter
 
-	self.applyFilter()
+	self.applyFilter(useFuzzySearch)
 }
 
 func (self *FilteredList[T]) ClearFilter() {
-	self.SetFilter("")
+	self.SetFilter("", false)
+}
+
+func (self *FilteredList[T]) ReApplyFilter(useFuzzySearch bool) {
+	self.applyFilter(useFuzzySearch)
 }
 
 func (self *FilteredList[T]) IsFiltering() bool {
@@ -53,27 +61,38 @@ func (self *FilteredList[T]) UnfilteredLen() int {
 	return len(self.getList())
 }
 
-func (self *FilteredList[T]) applyFilter() {
+type fuzzySource[T any] struct {
+	list            []T
+	getFilterFields func(T) []string
+}
+
+var _ fuzzy.Source = &fuzzySource[string]{}
+
+func (self *fuzzySource[T]) String(i int) string {
+	return strings.Join(self.getFilterFields(self.list[i]), " ")
+}
+
+func (self *fuzzySource[T]) Len() int {
+	return len(self.list)
+}
+
+func (self *FilteredList[T]) applyFilter(useFuzzySearch bool) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
 	if self.filter == "" {
 		self.filteredIndices = nil
 	} else {
-		self.filteredIndices = []int{}
-		for i, item := range self.getList() {
-			for _, field := range self.getFilterFields(item) {
-				if self.match(field, self.filter) {
-					self.filteredIndices = append(self.filteredIndices, i)
-					break
-				}
-			}
+		source := &fuzzySource[T]{
+			list:            self.getList(),
+			getFilterFields: self.getFilterFields,
 		}
-	}
-}
 
-func (self *FilteredList[T]) match(haystack string, needle string) bool {
-	return utils.CaseAwareContains(haystack, needle)
+		matches := utils.FindFrom(self.filter, source, useFuzzySearch)
+		self.filteredIndices = lo.Map(matches, func(match fuzzy.Match, _ int) int {
+			return match.Index
+		})
+	}
 }
 
 func (self *FilteredList[T]) UnfilteredIndex(index int) int {

@@ -3,8 +3,9 @@ package filetree
 import (
 	"fmt"
 
-	"github.com/jesseduffield/generics/slices"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
+	"github.com/jesseduffield/lazygit/pkg/gui/types"
+	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 )
 
@@ -14,6 +15,7 @@ const (
 	DisplayAll FileTreeDisplayFilter = iota
 	DisplayStaged
 	DisplayUnstaged
+	DisplayTracked
 	// this shows files with merge conflicts
 	DisplayConflicted
 )
@@ -24,10 +26,13 @@ type ITree[T any] interface {
 	ToggleShowTree()
 	GetIndexForPath(path string) (int, bool)
 	Len() int
+	GetItem(index int) types.HasUrn
 	SetTree()
 	IsCollapsed(path string) bool
 	ToggleCollapsed(path string)
 	CollapsedPaths() *CollapsedPaths
+	CollapseAll()
+	ExpandAll()
 }
 
 type IFileTree interface {
@@ -80,6 +85,8 @@ func (self *FileTree) getFilesForDisplay() []*models.File {
 		return self.FilterFiles(func(file *models.File) bool { return file.HasStagedChanges })
 	case DisplayUnstaged:
 		return self.FilterFiles(func(file *models.File) bool { return file.HasUnstagedChanges })
+	case DisplayTracked:
+		return self.FilterFiles(func(file *models.File) bool { return file.Tracked })
 	case DisplayConflicted:
 		return self.FilterFiles(func(file *models.File) bool { return file.HasMergeConflicts })
 	default:
@@ -88,7 +95,7 @@ func (self *FileTree) getFilesForDisplay() []*models.File {
 }
 
 func (self *FileTree) FilterFiles(test func(*models.File) bool) []*models.File {
-	return slices.Filter(self.getFiles(), test)
+	return lo.Filter(self.getFiles(), func(file *models.File, _ int) bool { return test(file) })
 }
 
 func (self *FileTree) SetStatusFilter(filter FileTreeDisplayFilter) {
@@ -130,13 +137,19 @@ func (self *FileTree) GetAllItems() []*FileNode {
 	}
 
 	// ignoring root
-	return slices.Map(self.tree.Flatten(self.collapsedPaths)[1:], func(node *Node[models.File]) *FileNode {
+	return lo.Map(self.tree.Flatten(self.collapsedPaths)[1:], func(node *Node[models.File], _ int) *FileNode {
 		return NewFileNode(node)
 	})
 }
 
 func (self *FileTree) Len() int {
-	return self.tree.Size(self.collapsedPaths) - 1 // ignoring root
+	// -1 because we're ignoring the root
+	return max(self.tree.Size(self.collapsedPaths)-1, 0)
+}
+
+func (self *FileTree) GetItem(index int) types.HasUrn {
+	// Unimplemented because we don't yet need to show inlines statuses in commit file views
+	return nil
 }
 
 func (self *FileTree) GetAllFiles() []*models.File {
@@ -158,6 +171,20 @@ func (self *FileTree) IsCollapsed(path string) bool {
 
 func (self *FileTree) ToggleCollapsed(path string) {
 	self.collapsedPaths.ToggleCollapsed(path)
+}
+
+func (self *FileTree) CollapseAll() {
+	dirPaths := lo.FilterMap(self.GetAllItems(), func(file *FileNode, index int) (string, bool) {
+		return file.Path, !file.IsFile()
+	})
+
+	for _, path := range dirPaths {
+		self.collapsedPaths.Collapse(path)
+	}
+}
+
+func (self *FileTree) ExpandAll() {
+	self.collapsedPaths.ExpandAll()
 }
 
 func (self *FileTree) Tree() *FileNode {

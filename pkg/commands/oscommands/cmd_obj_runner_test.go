@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/utils"
 )
 
@@ -12,6 +13,18 @@ func getRunner() *cmdObjRunner {
 	return &cmdObjRunner{
 		log:   log,
 		guiIO: NewNullGuiIO(log),
+	}
+}
+
+func toChanFn(f func(ct CredentialType) string) func(CredentialType) <-chan string {
+	return func(ct CredentialType) <-chan string {
+		ch := make(chan string)
+
+		go func() {
+			ch <- f(ct)
+		}()
+
+		return ch
 	}
 }
 
@@ -26,6 +39,8 @@ func TestProcessOutput(t *testing.T) {
 			return "passphrase"
 		case PIN:
 			return "pin"
+		case Token:
+			return "token"
 		default:
 			panic("unexpected credential type")
 		}
@@ -80,6 +95,12 @@ func TestProcessOutput(t *testing.T) {
 			expectedToWrite:         "pin",
 		},
 		{
+			name:                    "2FA token prompt",
+			promptUserForCredential: defaultPromptUserForCredential,
+			output:                  "testuser 2FA Token (citadel)",
+			expectedToWrite:         "token",
+		},
+		{
 			name:                    "username and password prompt",
 			promptUserForCredential: defaultPromptUserForCredential,
 			output:                  "Password:\nUsername for 'Alice':\n",
@@ -99,7 +120,8 @@ func TestProcessOutput(t *testing.T) {
 			reader := strings.NewReader(scenario.output)
 			writer := &strings.Builder{}
 
-			runner.processOutput(reader, writer, scenario.promptUserForCredential)
+			task := gocui.NewFakeTask()
+			runner.processOutput(reader, writer, toChanFn(scenario.promptUserForCredential), task)
 
 			if writer.String() != scenario.expectedToWrite {
 				t.Errorf("expected to write '%s' but got '%s'", scenario.expectedToWrite, writer.String())

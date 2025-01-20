@@ -97,12 +97,12 @@ func (self *Patch) LineNumberOfLine(idx int) int {
 	idxInHunk := idx - hunkStartIdx
 
 	if idxInHunk == 0 {
-		return hunk.oldStart
+		return hunk.newStart
 	}
 
 	lines := hunk.bodyLines[:idxInHunk-1]
 	offset := nLinesWithKind(lines, []PatchLineKind{ADDITION, CONTEXT})
-	return hunk.oldStart + offset
+	return hunk.newStart + offset
 }
 
 // Returns hunk index containing the line at the given patch line index
@@ -148,4 +148,30 @@ func (self *Patch) LineCount() int {
 		count += hunk.lineCount()
 	}
 	return count
+}
+
+// Returns the number of hunks of the patch
+func (self *Patch) HunkCount() int {
+	return len(self.hunks)
+}
+
+// Adjust the given line number (one-based) according to the current patch. The
+// patch is supposed to be a diff of an old file state against the working
+// directory; the line number is a line number in that old file, and the
+// function returns the corresponding line number in the working directory file.
+func (self *Patch) AdjustLineNumber(lineNumber int) int {
+	adjustedLineNumber := lineNumber
+	for _, hunk := range self.hunks {
+		if hunk.oldStart >= lineNumber {
+			break
+		}
+
+		if hunk.oldStart+hunk.oldLength() > lineNumber {
+			return hunk.newStart
+		}
+
+		adjustedLineNumber += hunk.newLength() - hunk.oldLength()
+	}
+
+	return adjustedLineNumber
 }

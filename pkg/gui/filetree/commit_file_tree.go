@@ -1,8 +1,9 @@
 package filetree
 
 import (
-	"github.com/jesseduffield/generics/slices"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
+	"github.com/jesseduffield/lazygit/pkg/gui/types"
+	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 )
 
@@ -22,6 +23,20 @@ type CommitFileTree struct {
 	showTree       bool
 	log            *logrus.Entry
 	collapsedPaths *CollapsedPaths
+}
+
+func (self *CommitFileTree) CollapseAll() {
+	dirPaths := lo.FilterMap(self.GetAllItems(), func(file *CommitFileNode, index int) (string, bool) {
+		return file.Path, !file.IsFile()
+	})
+
+	for _, path := range dirPaths {
+		self.collapsedPaths.Collapse(path)
+	}
+}
+
+func (self *CommitFileTree) ExpandAll() {
+	self.collapsedPaths.ExpandAll()
 }
 
 var _ ICommitFileTree = &CommitFileTree{}
@@ -60,13 +75,18 @@ func (self *CommitFileTree) GetAllItems() []*CommitFileNode {
 	}
 
 	// ignoring root
-	return slices.Map(self.tree.Flatten(self.collapsedPaths)[1:], func(node *Node[models.CommitFile]) *CommitFileNode {
+	return lo.Map(self.tree.Flatten(self.collapsedPaths)[1:], func(node *Node[models.CommitFile], _ int) *CommitFileNode {
 		return NewCommitFileNode(node)
 	})
 }
 
 func (self *CommitFileTree) Len() int {
 	return self.tree.Size(self.collapsedPaths) - 1 // ignoring root
+}
+
+func (self *CommitFileTree) GetItem(index int) types.HasUrn {
+	// Unimplemented because we don't yet need to show inlines statuses in commit file views
+	return nil
 }
 
 func (self *CommitFileTree) GetAllFiles() []*models.CommitFile {

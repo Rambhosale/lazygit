@@ -24,17 +24,21 @@ var (
 
 	// GocuiSelectedLineBgColor is the background color for the selected line in gocui
 	GocuiSelectedLineBgColor gocui.Attribute
+	// GocuiInactiveViewSelectedLineBgColor is the background color for the selected line in gocui if the view doesn't have focus
+	GocuiInactiveViewSelectedLineBgColor gocui.Attribute
 
 	OptionsColor gocui.Attribute
 
 	// SelectedLineBgColor is the background color for the selected line
 	SelectedLineBgColor = style.New()
-
-	// SelectedRangeBgColor is the background color of the selected range of lines
-	SelectedRangeBgColor = style.New()
+	// InactiveViewSelectedLineBgColor is the background color for the selected line if the view doesn't have the focus
+	InactiveViewSelectedLineBgColor = style.New()
 
 	// CherryPickedCommitColor is the text style when cherry picking a commit
 	CherryPickedCommitTextStyle = style.New()
+
+	// MarkedBaseCommitTextStyle is the text style of the marked rebase base commit
+	MarkedBaseCommitTextStyle = style.New()
 
 	OptionsFgColor = style.New()
 
@@ -49,16 +53,21 @@ func UpdateTheme(themeConfig config.ThemeConfig) {
 	InactiveBorderColor = GetGocuiStyle(themeConfig.InactiveBorderColor)
 	SearchingActiveBorderColor = GetGocuiStyle(themeConfig.SearchingActiveBorderColor)
 	SelectedLineBgColor = GetTextStyle(themeConfig.SelectedLineBgColor, true)
-	SelectedRangeBgColor = GetTextStyle(themeConfig.SelectedRangeBgColor, true)
+	InactiveViewSelectedLineBgColor = GetTextStyle(themeConfig.InactiveViewSelectedLineBgColor, true)
 
 	cherryPickedCommitBgTextStyle := GetTextStyle(themeConfig.CherryPickedCommitBgColor, true)
 	cherryPickedCommitFgTextStyle := GetTextStyle(themeConfig.CherryPickedCommitFgColor, false)
 	CherryPickedCommitTextStyle = cherryPickedCommitBgTextStyle.MergeStyle(cherryPickedCommitFgTextStyle)
 
+	markedBaseCommitBgTextStyle := GetTextStyle(themeConfig.MarkedBaseCommitBgColor, true)
+	markedBaseCommitFgTextStyle := GetTextStyle(themeConfig.MarkedBaseCommitFgColor, false)
+	MarkedBaseCommitTextStyle = markedBaseCommitBgTextStyle.MergeStyle(markedBaseCommitFgTextStyle)
+
 	unstagedChangesTextStyle := GetTextStyle(themeConfig.UnstagedChangesColor, false)
 	UnstagedChangesColor = unstagedChangesTextStyle
 
 	GocuiSelectedLineBgColor = GetGocuiStyle(themeConfig.SelectedLineBgColor)
+	GocuiInactiveViewSelectedLineBgColor = GetGocuiStyle(themeConfig.InactiveViewSelectedLineBgColor)
 	OptionsColor = GetGocuiStyle(themeConfig.OptionsTextColor)
 	OptionsFgColor = GetTextStyle(themeConfig.OptionsTextColor, false)
 

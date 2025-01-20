@@ -16,12 +16,20 @@ func (t *Tag) RefName() string {
 	return t.Name
 }
 
+func (t *Tag) ShortRefName() string {
+	return t.RefName()
+}
+
 func (t *Tag) ParentRefName() string {
 	return t.RefName() + "^"
 }
 
 func (t *Tag) ID() string {
 	return t.RefName()
+}
+
+func (t *Tag) URN() string {
+	return "tag-" + t.ID()
 }
 
 func (t *Tag) Description() string {

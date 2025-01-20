@@ -15,14 +15,16 @@ var PullRebase = NewIntegrationTest(NewIntegrationTestArgs{
 		shell.Commit("one")
 		shell.UpdateFileAndAdd("file", "content2")
 		shell.Commit("two")
-		shell.EmptyCommit("three")
+		shell.CreateFileAndAdd("file3", "content3")
+		shell.Commit("three")
 
 		shell.CloneIntoRemote("origin")
 
 		shell.SetBranchUpstream("master", "origin/master")
 
 		shell.HardReset("HEAD^^")
-		shell.EmptyCommit("four")
+		shell.CreateFileAndAdd("file4", "content4")
+		shell.Commit("four")
 
 		shell.SetConfig("pull.rebase", "true")
 	},
@@ -33,13 +35,13 @@ var PullRebase = NewIntegrationTest(NewIntegrationTestArgs{
 				Contains("one"),
 			)
 
-		t.Views().Status().Content(Contains("↓2 repo → master"))
+		t.Views().Status().Content(Equals("↓2↑1 repo → master"))
 
 		t.Views().Files().
 			IsFocused().
 			Press(keys.Universal.Pull)
 
-		t.Views().Status().Content(Contains("↑1 repo → master"))
+		t.Views().Status().Content(Equals("↑1 repo → master"))
 
 		t.Views().Commits().
 			Lines(

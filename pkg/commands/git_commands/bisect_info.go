@@ -2,7 +2,7 @@ package git_commands
 
 import (
 	"github.com/jesseduffield/generics/maps"
-	"github.com/jesseduffield/generics/slices"
+	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 )
 
@@ -29,10 +29,10 @@ type BisectInfo struct {
 	newTerm string // 'bad' by default
 	oldTerm string // 'good' by default
 
-	// map of commit sha's to their status
+	// map of commit hashes to their status
 	statusMap map[string]BisectStatus
 
-	// the sha of the commit that's under test
+	// the hash of the commit that's under test
 	current string
 }
 
@@ -49,26 +49,26 @@ func NewNullBisectInfo() *BisectInfo {
 	return &BisectInfo{started: false}
 }
 
-func (self *BisectInfo) GetNewSha() string {
-	for sha, status := range self.statusMap {
+func (self *BisectInfo) GetNewHash() string {
+	for hash, status := range self.statusMap {
 		if status == BisectStatusNew {
-			return sha
+			return hash
 		}
 	}
 
 	return ""
 }
 
-func (self *BisectInfo) GetCurrentSha() string {
+func (self *BisectInfo) GetCurrentHash() string {
 	return self.current
 }
 
-func (self *BisectInfo) GetStartSha() string {
+func (self *BisectInfo) GetStartHash() string {
 	return self.start
 }
 
-func (self *BisectInfo) Status(commitSha string) (BisectStatus, bool) {
-	status, ok := self.statusMap[commitSha]
+func (self *BisectInfo) Status(commitHash string) (BisectStatus, bool) {
+	status, ok := self.statusMap[commitHash]
 	return status, ok
 }
 
@@ -93,9 +93,9 @@ func (self *BisectInfo) Bisecting() bool {
 		return false
 	}
 
-	if self.GetNewSha() == "" {
+	if self.GetNewHash() == "" {
 		return false
 	}
 
-	return slices.Contains(maps.Values(self.statusMap), BisectStatusOld)
+	return lo.Contains(maps.Values(self.statusMap), BisectStatusOld)
 }

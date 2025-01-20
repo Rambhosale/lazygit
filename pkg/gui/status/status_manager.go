@@ -3,8 +3,11 @@ package status
 import (
 	"time"
 
-	"github.com/jesseduffield/generics/slices"
+	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazygit/pkg/config"
+	"github.com/jesseduffield/lazygit/pkg/gui/types"
 	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/samber/lo"
 	"github.com/sasha-s/go-deadlock"
 )
 
@@ -16,9 +19,28 @@ type StatusManager struct {
 	mutex    deadlock.Mutex
 }
 
+// Can be used to manipulate a waiting status while it is running (e.g. pause
+// and resume it)
+type WaitingStatusHandle struct {
+	statusManager *StatusManager
+	message       string
+	renderFunc    func()
+	id            int
+}
+
+func (self *WaitingStatusHandle) Show() {
+	self.id = self.statusManager.addStatus(self.message, "waiting", types.ToastKindStatus)
+	self.renderFunc()
+}
+
+func (self *WaitingStatusHandle) Hide() {
+	self.statusManager.removeStatus(self.id)
+}
+
 type appStatus struct {
 	message    string
 	statusType string
+	color      gocui.Attribute
 	id         int
 }
 
@@ -26,42 +48,20 @@ func NewStatusManager() *StatusManager {
 	return &StatusManager{}
 }
 
-func (self *StatusManager) WithWaitingStatus(message string, f func()) {
-	self.mutex.Lock()
+func (self *StatusManager) WithWaitingStatus(message string, renderFunc func(), f func(*WaitingStatusHandle) error) error {
+	handle := &WaitingStatusHandle{statusManager: self, message: message, renderFunc: renderFunc, id: -1}
+	handle.Show()
+	defer handle.Hide()
 
-	self.nextId += 1
-	id := self.nextId
-
-	newStatus := appStatus{
-		message:    message,
-		statusType: "waiting",
-		id:         id,
-	}
-	self.statuses = append([]appStatus{newStatus}, self.statuses...)
-
-	self.mutex.Unlock()
-
-	f()
-
-	self.removeStatus(id)
+	return f(handle)
 }
 
-func (self *StatusManager) AddToastStatus(message string) int {
-	self.mutex.Lock()
-	defer self.mutex.Unlock()
-
-	self.nextId++
-	id := self.nextId
-
-	newStatus := appStatus{
-		message:    message,
-		statusType: "toast",
-		id:         id,
-	}
-	self.statuses = append([]appStatus{newStatus}, self.statuses...)
+func (self *StatusManager) AddToastStatus(message string, kind types.ToastKind) int {
+	id := self.addStatus(message, "toast", kind)
 
 	go func() {
-		time.Sleep(time.Second * 2)
+		delay := lo.Ternary(kind == types.ToastKindError, time.Second*4, time.Second*2)
+		time.Sleep(delay)
 
 		self.removeStatus(id)
 	}()
@@ -69,26 +69,49 @@ func (self *StatusManager) AddToastStatus(message string) int {
 	return id
 }
 
-func (self *StatusManager) GetStatusString() string {
+func (self *StatusManager) GetStatusString(userConfig *config.UserConfig) (string, gocui.Attribute) {
 	if len(self.statuses) == 0 {
-		return ""
+		return "", gocui.ColorDefault
 	}
 	topStatus := self.statuses[0]
 	if topStatus.statusType == "waiting" {
-		return topStatus.message + " " + utils.Loader()
+		return topStatus.message + " " + utils.Loader(time.Now(), userConfig.Gui.Spinner), topStatus.color
 	}
-	return topStatus.message
+	return topStatus.message, topStatus.color
 }
 
 func (self *StatusManager) HasStatus() bool {
 	return len(self.statuses) > 0
 }
 
+func (self *StatusManager) addStatus(message string, statusType string, kind types.ToastKind) int {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+
+	self.nextId++
+	id := self.nextId
+
+	color := gocui.ColorCyan
+	if kind == types.ToastKindError {
+		color = gocui.ColorRed
+	}
+
+	newStatus := appStatus{
+		message:    message,
+		statusType: statusType,
+		color:      color,
+		id:         id,
+	}
+	self.statuses = append([]appStatus{newStatus}, self.statuses...)
+
+	return id
+}
+
 func (self *StatusManager) removeStatus(id int) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
-	self.statuses = slices.Filter(self.statuses, func(status appStatus) bool {
+	self.statuses = lo.Filter(self.statuses, func(status appStatus, _ int) bool {
 		return status.id != id
 	})
 }

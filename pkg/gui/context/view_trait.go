@@ -21,9 +21,26 @@ func (self *ViewTrait) FocusPoint(yIdx int) {
 	self.view.FocusPoint(self.view.OriginX(), yIdx)
 }
 
+func (self *ViewTrait) SetRangeSelectStart(yIdx int) {
+	self.view.SetRangeSelectStart(yIdx)
+}
+
+func (self *ViewTrait) CancelRangeSelect() {
+	self.view.CancelRangeSelect()
+}
+
 func (self *ViewTrait) SetViewPortContent(content string) {
 	_, y := self.view.Origin()
 	self.view.OverwriteLines(y, content)
+}
+
+func (self *ViewTrait) SetViewPortContentAndClearEverythingElse(content string) {
+	_, y := self.view.Origin()
+	self.view.OverwriteLinesAndClearEverythingElse(y, content)
+}
+
+func (self *ViewTrait) SetContentLineCount(lineCount int) {
+	self.view.SetContentLineCount(lineCount)
 }
 
 func (self *ViewTrait) SetContent(content string) {
@@ -32,6 +49,7 @@ func (self *ViewTrait) SetContent(content string) {
 
 func (self *ViewTrait) SetHighlight(highlight bool) {
 	self.view.Highlight = highlight
+	self.view.HighlightInactive = false
 }
 
 func (self *ViewTrait) SetFooter(value string) {
@@ -39,13 +57,13 @@ func (self *ViewTrait) SetFooter(value string) {
 }
 
 func (self *ViewTrait) SetOriginX(value int) {
-	_ = self.view.SetOriginX(value)
+	self.view.SetOriginX(value)
 }
 
 // tells us the start of line indexes shown in the view currently as well as the capacity of lines shown in the viewport.
 func (self *ViewTrait) ViewPortYBounds() (int, int) {
 	_, start := self.view.Origin()
-	length := self.view.InnerHeight() + 1
+	length := self.view.InnerHeight()
 	return start, length
 }
 
@@ -71,7 +89,7 @@ func (self *ViewTrait) ScrollDown(value int) {
 
 // this returns the amount we'll scroll if we want to scroll by a page.
 func (self *ViewTrait) PageDelta() int {
-	_, height := self.view.Size()
+	height := self.view.InnerHeight()
 
 	delta := height - 1
 	if delta == 0 {

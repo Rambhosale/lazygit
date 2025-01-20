@@ -20,7 +20,7 @@ var SuggestionsCommand = NewIntegrationTest(NewIntegrationTestArgs{
 		shell.EmptyCommit("blah")
 	},
 	SetupConfig: func(cfg *config.AppConfig) {
-		cfg.UserConfig.CustomCommands = []config.CustomCommand{
+		cfg.GetUserConfig().CustomCommands = []config.CustomCommand{
 			{
 				Key:     "a",
 				Context: "localBranches",
@@ -57,8 +57,8 @@ var SuggestionsCommand = NewIntegrationTest(NewIntegrationTestArgs{
 
 		t.Views().Branches().
 			Lines(
-				Contains("branch-three").IsSelected(),
-				Contains("branch-four"),
+				Contains("branch-three"),
+				Contains("branch-four").IsSelected(),
 				Contains("branch-two"),
 				Contains("branch-one"),
 			)

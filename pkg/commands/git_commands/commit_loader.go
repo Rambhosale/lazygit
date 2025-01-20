@@ -6,16 +6,18 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
-	"github.com/fsmiamoto/git-todo-parser/todo"
-	"github.com/jesseduffield/generics/slices"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
 	"github.com/jesseduffield/lazygit/pkg/commands/types/enums"
 	"github.com/jesseduffield/lazygit/pkg/common"
+	"github.com/jesseduffield/lazygit/pkg/utils"
 	"github.com/samber/lo"
+	"github.com/stefanhaller/git-todo-parser/todo"
 )
 
 // context:
@@ -33,11 +35,6 @@ type CommitLoader struct {
 	readFile      func(filename string) ([]byte, error)
 	walkFiles     func(root string, fn filepath.WalkFunc) error
 	dotGitDir     string
-	// List of main branches that exist in the repo.
-	// We use these to obtain the merge base of the branch.
-	// When nil, we're yet to obtain the list of existing main branches.
-	// When an empty slice, we've obtained the list and it's empty.
-	mainBranches []string
 	*GitCommon
 }
 
@@ -45,7 +42,6 @@ type CommitLoader struct {
 func NewCommitLoader(
 	cmn *common.Common,
 	cmd oscommands.ICmdObjBuilder,
-	dotGitDir string,
 	getRebaseMode func() (enums.RebaseMode, error),
 	gitCommon *GitCommon,
 ) *CommitLoader {
@@ -55,8 +51,6 @@ func NewCommitLoader(
 		getRebaseMode: getRebaseMode,
 		readFile:      os.ReadFile,
 		walkFiles:     filepath.Walk,
-		dotGitDir:     dotGitDir,
-		mainBranches:  nil,
 		GitCommon:     gitCommon,
 	}
 }
@@ -64,10 +58,15 @@ func NewCommitLoader(
 type GetCommitsOptions struct {
 	Limit                bool
 	FilterPath           string
+	FilterAuthor         string
 	IncludeRebaseCommits bool
 	RefName              string // e.g. "HEAD" or "my_branch"
+	RefForPushedStatus   string // the ref to use for determining pushed/unpushed status
 	// determines if we show the whole git graph i.e. pass the '--all' flag
 	All bool
+	// If non-empty, show divergence from this ref (left-right log)
+	RefToShowDivergenceFrom string
+	MainBranches            *MainBranches
 }
 
 // GetCommits obtains the commits of the current branch
@@ -84,31 +83,81 @@ func (self *CommitLoader) GetCommits(opts GetCommitsOptions) ([]*models.Commit, 
 		commits = append(commits, rebasingCommits...)
 	}
 
+	wg := sync.WaitGroup{}
+
+	wg.Add(2)
+
+	var logErr error
+	go utils.Safe(func() {
+		defer wg.Done()
+
+		logErr = self.getLogCmd(opts).RunAndProcessLines(func(line string) (bool, error) {
+			commit := self.extractCommitFromLine(line, opts.RefToShowDivergenceFrom != "")
+			commits = append(commits, commit)
+			return false, nil
+		})
+	})
+
+	var ancestor string
+	var remoteAncestor string
+	go utils.Safe(func() {
+		defer wg.Done()
+
+		ancestor = opts.MainBranches.GetMergeBase(opts.RefName)
+		if opts.RefToShowDivergenceFrom != "" {
+			remoteAncestor = opts.MainBranches.GetMergeBase(opts.RefToShowDivergenceFrom)
+		}
+	})
+
 	passedFirstPushedCommit := false
-	firstPushedCommit, err := self.getFirstPushedCommit(opts.RefName)
+	// I can get this before
+	firstPushedCommit, err := self.getFirstPushedCommit(opts.RefForPushedStatus)
 	if err != nil {
 		// must have no upstream branch so we'll consider everything as pushed
 		passedFirstPushedCommit = true
 	}
 
-	err = self.getLogCmd(opts).RunAndProcessLines(func(line string) (bool, error) {
-		commit := self.extractCommitFromLine(line)
-		if commit.Sha == firstPushedCommit {
+	wg.Wait()
+
+	if logErr != nil {
+		return nil, logErr
+	}
+
+	for _, commit := range commits {
+		if commit.Hash == firstPushedCommit {
 			passedFirstPushedCommit = true
 		}
-		commit.Status = map[bool]models.CommitStatus{true: models.StatusUnpushed, false: models.StatusPushed}[!passedFirstPushedCommit]
-		commits = append(commits, commit)
-		return false, nil
-	})
-	if err != nil {
-		return nil, err
+		if commit.Status != models.StatusRebasing {
+			if passedFirstPushedCommit {
+				commit.Status = models.StatusPushed
+			} else {
+				commit.Status = models.StatusUnpushed
+			}
+		}
 	}
 
 	if len(commits) == 0 {
 		return commits, nil
 	}
 
-	commits = self.setCommitMergedStatuses(opts.RefName, commits)
+	if opts.RefToShowDivergenceFrom != "" {
+		sort.SliceStable(commits, func(i, j int) bool {
+			// In the divergence view we want incoming commits to come first
+			return commits[i].Divergence > commits[j].Divergence
+		})
+
+		_, localSectionStart, found := lo.FindIndexOf(commits, func(commit *models.Commit) bool {
+			return commit.Divergence == models.DivergenceLeft
+		})
+		if !found {
+			localSectionStart = len(commits)
+		}
+
+		setCommitMergedStatuses(remoteAncestor, commits[:localSectionStart])
+		setCommitMergedStatuses(ancestor, commits[localSectionStart:])
+	} else {
+		setCommitMergedStatuses(ancestor, commits)
+	}
 
 	return commits, nil
 }
@@ -144,29 +193,39 @@ func (self *CommitLoader) MergeRebasingCommits(commits []*models.Commit) ([]*mod
 	return result, nil
 }
 
-// extractCommitFromLine takes a line from a git log and extracts the sha, message, date, and tag if present
+// extractCommitFromLine takes a line from a git log and extracts the hash, message, date, and tag if present
 // then puts them into a commit object
 // example input:
 // 8ad01fe32fcc20f07bc6693f87aa4977c327f1e1|10 hours ago|Jesse Duffield| (HEAD -> master, tag: v0.15.2)|refresh commits when adding a tag
-func (self *CommitLoader) extractCommitFromLine(line string) *models.Commit {
-	split := strings.SplitN(line, "\x00", 7)
+func (self *CommitLoader) extractCommitFromLine(line string, showDivergence bool) *models.Commit {
+	split := strings.SplitN(line, "\x00", 8)
 
-	sha := split[0]
+	hash := split[0]
 	unixTimestamp := split[1]
 	authorName := split[2]
 	authorEmail := split[3]
 	extraInfo := strings.TrimSpace(split[4])
 	parentHashes := split[5]
-	message := split[6]
+	divergence := models.DivergenceNone
+	if showDivergence {
+		divergence = lo.Ternary(split[6] == "<", models.DivergenceLeft, models.DivergenceRight)
+	}
+	message := split[7]
 
 	tags := []string{}
 
 	if extraInfo != "" {
-		re := regexp.MustCompile(`tag: ([^,\)]+)`)
-		tagMatch := re.FindStringSubmatch(extraInfo)
-		if len(tagMatch) > 1 {
-			tags = append(tags, tagMatch[1])
+		extraInfoFields := strings.Split(extraInfo, ",")
+		for _, extraInfoField := range extraInfoFields {
+			extraInfoField = strings.TrimSpace(extraInfoField)
+			re := regexp.MustCompile(`tag: (.+)`)
+			tagMatch := re.FindStringSubmatch(extraInfoField)
+			if len(tagMatch) > 1 {
+				tags = append(tags, tagMatch[1])
+			}
 		}
+
+		extraInfo = "(" + extraInfo + ")"
 	}
 
 	unitTimestampInt, _ := strconv.Atoi(unixTimestamp)
@@ -177,7 +236,7 @@ func (self *CommitLoader) extractCommitFromLine(line string) *models.Commit {
 	}
 
 	return &models.Commit{
-		Sha:           sha,
+		Hash:          hash,
 		Name:          message,
 		Tags:          tags,
 		ExtraInfo:     extraInfo,
@@ -185,21 +244,19 @@ func (self *CommitLoader) extractCommitFromLine(line string) *models.Commit {
 		AuthorName:    authorName,
 		AuthorEmail:   authorEmail,
 		Parents:       parents,
+		Divergence:    divergence,
 	}
 }
 
 func (self *CommitLoader) getHydratedRebasingCommits(rebaseMode enums.RebaseMode) ([]*models.Commit, error) {
-	commits, err := self.getRebasingCommits(rebaseMode)
-	if err != nil {
-		return nil, err
-	}
+	commits := self.getRebasingCommits(rebaseMode)
 
 	if len(commits) == 0 {
 		return nil, nil
 	}
 
-	commitShas := slices.FilterMap(commits, func(commit *models.Commit) (string, bool) {
-		return commit.Sha, commit.Sha != ""
+	commitHashes := lo.FilterMap(commits, func(commit *models.Commit, _ int) (string, bool) {
+		return commit.Hash, commit.Hash != ""
 	})
 
 	// note that we're not filtering these as we do non-rebasing commits just because
@@ -208,25 +265,38 @@ func (self *CommitLoader) getHydratedRebasingCommits(rebaseMode enums.RebaseMode
 		NewGitCmd("show").
 			Config("log.showSignature=false").
 			Arg("--no-patch", "--oneline", "--abbrev=20", prettyFormat).
-			Arg(commitShas...).
+			Arg(commitHashes...).
 			ToArgv(),
 	).DontLog()
 
 	fullCommits := map[string]*models.Commit{}
-	err = cmdObj.RunAndProcessLines(func(line string) (bool, error) {
-		commit := self.extractCommitFromLine(line)
-		fullCommits[commit.Sha] = commit
+	err := cmdObj.RunAndProcessLines(func(line string) (bool, error) {
+		commit := self.extractCommitFromLine(line, false)
+		fullCommits[commit.Hash] = commit
 		return false, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	findFullCommit := lo.Ternary(self.version.IsOlderThan(2, 25, 2),
+		func(hash string) *models.Commit {
+			for s, c := range fullCommits {
+				if strings.HasPrefix(s, hash) {
+					return c
+				}
+			}
+			return nil
+		},
+		func(hash string) *models.Commit {
+			return fullCommits[hash]
+		})
+
 	hydratedCommits := make([]*models.Commit, 0, len(commits))
 	for _, rebasingCommit := range commits {
-		if rebasingCommit.Sha == "" {
+		if rebasingCommit.Hash == "" {
 			hydratedCommits = append(hydratedCommits, rebasingCommit)
-		} else if commit := fullCommits[rebasingCommit.Sha]; commit != nil {
+		} else if commit := findFullCommit(rebasingCommit.Hash); commit != nil {
 			commit.Action = rebasingCommit.Action
 			commit.Status = rebasingCommit.Status
 			hydratedCommits = append(hydratedCommits, commit)
@@ -236,73 +306,20 @@ func (self *CommitLoader) getHydratedRebasingCommits(rebaseMode enums.RebaseMode
 }
 
 // getRebasingCommits obtains the commits that we're in the process of rebasing
-func (self *CommitLoader) getRebasingCommits(rebaseMode enums.RebaseMode) ([]*models.Commit, error) {
-	switch rebaseMode {
-	case enums.REBASE_MODE_MERGING:
-		return self.getNormalRebasingCommits()
-	case enums.REBASE_MODE_INTERACTIVE:
-		return self.getInteractiveRebasingCommits()
-	default:
-		return nil, nil
-	}
-}
-
-func (self *CommitLoader) getNormalRebasingCommits() ([]*models.Commit, error) {
-	rewrittenCount := 0
-	bytesContent, err := self.readFile(filepath.Join(self.dotGitDir, "rebase-apply/rewritten"))
-	if err == nil {
-		content := string(bytesContent)
-		rewrittenCount = len(strings.Split(content, "\n"))
-	}
-
-	// we know we're rebasing, so lets get all the files whose names have numbers
-	commits := []*models.Commit{}
-	err = self.walkFiles(filepath.Join(self.dotGitDir, "rebase-apply"), func(path string, f os.FileInfo, err error) error {
-		if rewrittenCount > 0 {
-			rewrittenCount--
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		re := regexp.MustCompile(`^\d+$`)
-		if !re.MatchString(f.Name()) {
-			return nil
-		}
-		bytesContent, err := self.readFile(path)
-		if err != nil {
-			return err
-		}
-		content := string(bytesContent)
-		commit := self.commitFromPatch(content)
-		commits = append([]*models.Commit{commit}, commits...)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return commits, nil
-}
 
 // git-rebase-todo example:
 // pick ac446ae94ee560bdb8d1d057278657b251aaef17 ac446ae
 // pick afb893148791a2fbd8091aeb81deba4930c73031 afb8931
+func (self *CommitLoader) getRebasingCommits(rebaseMode enums.RebaseMode) []*models.Commit {
+	if rebaseMode != enums.REBASE_MODE_INTERACTIVE {
+		return nil
+	}
 
-// git-rebase-todo.backup example:
-// pick 49cbba374296938ea86bbd4bf4fee2f6ba5cccf6 third commit on master
-// pick ac446ae94ee560bdb8d1d057278657b251aaef17 blah  commit on master
-// pick afb893148791a2fbd8091aeb81deba4930c73031 fourth commit on master
-
-// getInteractiveRebasingCommits takes our git-rebase-todo and our git-rebase-todo.backup files
-// and extracts out the sha and names of commits that we still have to go
-// in the rebase:
-func (self *CommitLoader) getInteractiveRebasingCommits() ([]*models.Commit, error) {
-	bytesContent, err := self.readFile(filepath.Join(self.dotGitDir, "rebase-merge/git-rebase-todo"))
+	bytesContent, err := self.readFile(filepath.Join(self.repoPaths.WorktreeGitDirPath(), "rebase-merge/git-rebase-todo"))
 	if err != nil {
 		self.Log.Error(fmt.Sprintf("error occurred reading git-rebase-todo: %s", err.Error()))
 		// we assume an error means the file doesn't exist so we just return
-		return nil, nil
+		return nil
 	}
 
 	commits := []*models.Commit{}
@@ -310,14 +327,14 @@ func (self *CommitLoader) getInteractiveRebasingCommits() ([]*models.Commit, err
 	todos, err := todo.Parse(bytes.NewBuffer(bytesContent), self.config.GetCoreCommentChar())
 	if err != nil {
 		self.Log.Error(fmt.Sprintf("error occurred while parsing git-rebase-todo file: %s", err.Error()))
-		return nil, nil
+		return nil
 	}
 
 	// See if the current commit couldn't be applied because it conflicted; if
 	// so, add a fake entry for it
-	if conflictedCommitSha := self.getConflictedCommit(todos); conflictedCommitSha != "" {
+	if conflictedCommitHash := self.getConflictedCommit(todos); conflictedCommitHash != "" {
 		commits = append(commits, &models.Commit{
-			Sha:    conflictedCommitSha,
+			Hash:   conflictedCommitHash,
 			Name:   "",
 			Status: models.StatusRebasing,
 			Action: models.ActionConflict,
@@ -326,24 +343,26 @@ func (self *CommitLoader) getInteractiveRebasingCommits() ([]*models.Commit, err
 
 	for _, t := range todos {
 		if t.Command == todo.UpdateRef {
-			t.Msg = strings.TrimPrefix(t.Ref, "refs/heads/")
+			t.Msg = t.Ref
+		} else if t.Command == todo.Exec {
+			t.Msg = t.ExecCommand
 		} else if t.Commit == "" {
 			// Command does not have a commit associated, skip
 			continue
 		}
-		commits = slices.Prepend(commits, &models.Commit{
-			Sha:    t.Commit,
+		commits = utils.Prepend(commits, &models.Commit{
+			Hash:   t.Commit,
 			Name:   t.Msg,
 			Status: models.StatusRebasing,
 			Action: t.Command,
 		})
 	}
 
-	return commits, nil
+	return commits
 }
 
 func (self *CommitLoader) getConflictedCommit(todos []todo.Todo) string {
-	bytesContent, err := self.readFile(filepath.Join(self.dotGitDir, "rebase-merge/done"))
+	bytesContent, err := self.readFile(filepath.Join(self.repoPaths.WorktreeGitDirPath(), "rebase-merge/done"))
 	if err != nil {
 		self.Log.Error(fmt.Sprintf("error occurred reading rebase-merge/done: %s", err.Error()))
 		return ""
@@ -356,7 +375,7 @@ func (self *CommitLoader) getConflictedCommit(todos []todo.Todo) string {
 	}
 
 	amendFileExists := false
-	if _, err := os.Stat(filepath.Join(self.dotGitDir, "rebase-merge/amend")); err == nil {
+	if _, err := os.Stat(filepath.Join(self.repoPaths.WorktreeGitDirPath(), "rebase-merge/amend")); err == nil {
 		amendFileExists = true
 	}
 
@@ -429,30 +448,15 @@ func (self *CommitLoader) getConflictedCommitImpl(todos []todo.Todo, doneTodos [
 	return lastTodo.Commit
 }
 
-// assuming the file starts like this:
-// From e93d4193e6dd45ca9cf3a5a273d7ba6cd8b8fb20 Mon Sep 17 00:00:00 2001
-// From: Lazygit Tester <test@example.com>
-// Date: Wed, 5 Dec 2018 21:03:23 +1100
-// Subject: second commit on master
-func (self *CommitLoader) commitFromPatch(content string) *models.Commit {
-	lines := strings.Split(content, "\n")
-	sha := strings.Split(lines[0], " ")[1]
-	name := strings.TrimPrefix(lines[3], "Subject: ")
-	return &models.Commit{
-		Sha:    sha,
-		Name:   name,
-		Status: models.StatusRebasing,
-	}
-}
-
-func (self *CommitLoader) setCommitMergedStatuses(refName string, commits []*models.Commit) []*models.Commit {
-	ancestor := self.getMergeBase(refName)
+func setCommitMergedStatuses(ancestor string, commits []*models.Commit) {
 	if ancestor == "" {
-		return commits
+		return
 	}
+
 	passedAncestor := false
 	for i, commit := range commits {
-		if strings.HasPrefix(ancestor, commit.Sha) {
+		// some commits aren't really commits and don't have hashes, such as the update-ref todo
+		if commit.Hash != "" && strings.HasPrefix(ancestor, commit.Hash) {
 			passedAncestor = true
 		}
 		if commit.Status != models.StatusPushed && commit.Status != models.StatusUnpushed {
@@ -462,65 +466,6 @@ func (self *CommitLoader) setCommitMergedStatuses(refName string, commits []*mod
 			commits[i].Status = models.StatusMerged
 		}
 	}
-	return commits
-}
-
-func (self *CommitLoader) getMergeBase(refName string) string {
-	if self.mainBranches == nil {
-		self.mainBranches = self.getExistingMainBranches()
-	}
-
-	if len(self.mainBranches) == 0 {
-		return ""
-	}
-
-	// We pass all configured main branches to the merge-base call; git will
-	// return the base commit for the closest one.
-
-	output, err := self.cmd.New(
-		NewGitCmd("merge-base").Arg(refName).Arg(self.mainBranches...).
-			ToArgv(),
-	).DontLog().RunWithOutput()
-	if err != nil {
-		// If there's an error, it must be because one of the main branches that
-		// used to exist when we called getExistingMainBranches() was deleted
-		// meanwhile. To fix this for next time, throw away our cache.
-		self.mainBranches = nil
-	}
-	return ignoringWarnings(output)
-}
-
-func (self *CommitLoader) getExistingMainBranches() []string {
-	return lo.FilterMap(self.UserConfig.Git.MainBranches,
-		func(branchName string, _ int) (string, bool) {
-			// Try to determine upstream of local main branch
-			if ref, err := self.cmd.New(
-				NewGitCmd("rev-parse").Arg("--symbolic-full-name", branchName+"@{u}").ToArgv(),
-			).DontLog().RunWithOutput(); err == nil {
-				return strings.TrimSpace(ref), true
-			}
-
-			// If this failed, a local branch for this main branch doesn't exist or it
-			// has no upstream configured. Try looking for one in the "origin" remote.
-			ref := "refs/remotes/origin/" + branchName
-			if err := self.cmd.New(
-				NewGitCmd("rev-parse").Arg("--verify", "--quiet", ref).ToArgv(),
-			).DontLog().Run(); err == nil {
-				return ref, true
-			}
-
-			// If this failed as well, try if we have the main branch as a local
-			// branch. This covers the case where somebody is using git locally
-			// for something, but never pushing anywhere.
-			ref = "refs/heads/" + branchName
-			if err := self.cmd.New(
-				NewGitCmd("rev-parse").Arg("--verify", "--quiet", ref).ToArgv(),
-			).DontLog().Run(); err == nil {
-				return ref, true
-			}
-
-			return "", false
-		})
 }
 
 func ignoringWarnings(commandOutput string) string {
@@ -533,7 +478,7 @@ func ignoringWarnings(commandOutput string) string {
 	return lastLine
 }
 
-// getFirstPushedCommit returns the first commit SHA which has been pushed to the ref's upstream.
+// getFirstPushedCommit returns the first commit hash which has been pushed to the ref's upstream.
 // all commits above this are deemed unpushed and marked as such.
 func (self *CommitLoader) getFirstPushedCommit(refName string) (string, error) {
 	output, err := self.cmd.New(
@@ -553,18 +498,25 @@ func (self *CommitLoader) getFirstPushedCommit(refName string) (string, error) {
 
 // getLog gets the git log.
 func (self *CommitLoader) getLogCmd(opts GetCommitsOptions) oscommands.ICmdObj {
-	config := self.UserConfig.Git.Log
+	gitLogOrder := self.AppState.GitLogOrder
+
+	refSpec := opts.RefName
+	if opts.RefToShowDivergenceFrom != "" {
+		refSpec += "..." + opts.RefToShowDivergenceFrom
+	}
 
 	cmdArgs := NewGitCmd("log").
-		Arg(opts.RefName).
-		ArgIf(config.Order != "default", "--"+config.Order).
+		Arg(refSpec).
+		ArgIf(gitLogOrder != "default", "--"+gitLogOrder).
 		ArgIf(opts.All, "--all").
 		Arg("--oneline").
 		Arg(prettyFormat).
 		Arg("--abbrev=40").
+		ArgIf(opts.FilterAuthor != "", "--author="+opts.FilterAuthor).
 		ArgIf(opts.Limit, "-300").
 		ArgIf(opts.FilterPath != "", "--follow").
 		Arg("--no-show-signature").
+		ArgIf(opts.RefToShowDivergenceFrom != "", "--left-right").
 		Arg("--").
 		ArgIf(opts.FilterPath != "", opts.FilterPath).
 		ToArgv()
@@ -572,4 +524,4 @@ func (self *CommitLoader) getLogCmd(opts GetCommitsOptions) oscommands.ICmdObj {
 	return self.cmd.New(cmdArgs).DontLog()
 }
 
-const prettyFormat = `--pretty=format:%H%x00%at%x00%aN%x00%ae%x00%d%x00%p%x00%s`
+const prettyFormat = `--pretty=format:%H%x00%at%x00%aN%x00%ae%x00%D%x00%p%x00%m%x00%s`

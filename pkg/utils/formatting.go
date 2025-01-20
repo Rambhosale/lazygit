@@ -1,11 +1,13 @@
 package utils
 
 import (
+	"fmt"
 	"strings"
+	"unicode"
 
-	"github.com/jesseduffield/generics/slices"
 	"github.com/mattn/go-runewidth"
 	"github.com/samber/lo"
+	"golang.org/x/exp/slices"
 )
 
 type Alignment int
@@ -20,10 +22,22 @@ type ColumnConfig struct {
 	Alignment Alignment
 }
 
+func StringWidth(s string) int {
+	// We are intentionally not using a range loop here, because that would
+	// convert the characters to runes, which is unnecessary work in this case.
+	for i := 0; i < len(s); i++ {
+		if s[i] > unicode.MaxASCII {
+			return runewidth.StringWidth(s)
+		}
+	}
+
+	return len(s)
+}
+
 // WithPadding pads a string as much as you want
 func WithPadding(str string, padding int, alignment Alignment) string {
 	uncoloredStr := Decolorise(str)
-	width := runewidth.StringWidth(uncoloredStr)
+	width := StringWidth(uncoloredStr)
 	if padding < width {
 		return str
 	}
@@ -37,10 +51,18 @@ func WithPadding(str string, padding int, alignment Alignment) string {
 
 // defaults to left-aligning each column. If you want to set the alignment of
 // each column, pass in a slice of Alignment values.
-func RenderDisplayStrings(displayStringsArr [][]string, columnAlignments []Alignment) string {
-	displayStringsArr = excludeBlankColumns(displayStringsArr)
+// returns a list of strings that should be joined with "\n", and an array of
+// the column positions
+func RenderDisplayStrings(displayStringsArr [][]string, columnAlignments []Alignment) ([]string, []int) {
+	if len(displayStringsArr) == 0 {
+		return []string{}, nil
+	}
+
+	displayStringsArr, columnAlignments, removedColumns := excludeBlankColumns(displayStringsArr, columnAlignments)
 	padWidths := getPadWidths(displayStringsArr)
 	columnConfigs := make([]ColumnConfig, len(padWidths))
+	columnPositions := make([]int, len(padWidths)+1)
+	columnPositions[0] = 0
 	for i, padWidth := range padWidths {
 		// gracefully handle when columnAlignments is shorter than padWidths
 		alignment := AlignLeft
@@ -52,16 +74,23 @@ func RenderDisplayStrings(displayStringsArr [][]string, columnAlignments []Align
 			Width:     padWidth,
 			Alignment: alignment,
 		}
+		columnPositions[i+1] = columnPositions[i] + padWidth + 1
 	}
-	output := getPaddedDisplayStrings(displayStringsArr, columnConfigs)
-
-	return output
+	// Add the removed columns back into columnPositions (a removed column gets
+	// the same position as the following column); clients should be able to rely
+	// on them all to be there
+	for _, removedColumn := range removedColumns {
+		if removedColumn < len(columnPositions) {
+			columnPositions = slices.Insert(columnPositions, removedColumn, columnPositions[removedColumn])
+		}
+	}
+	return getPaddedDisplayStrings(displayStringsArr, columnConfigs), columnPositions
 }
 
 // NOTE: this mutates the input slice for the sake of performance
-func excludeBlankColumns(displayStringsArr [][]string) [][]string {
+func excludeBlankColumns(displayStringsArr [][]string, columnAlignments []Alignment) ([][]string, []Alignment, []int) {
 	if len(displayStringsArr) == 0 {
-		return displayStringsArr
+		return displayStringsArr, columnAlignments, []int{}
 	}
 
 	// if all rows share a blank column, we want to remove that column
@@ -77,26 +106,33 @@ outer:
 	}
 
 	if len(toRemove) == 0 {
-		return displayStringsArr
+		return displayStringsArr, columnAlignments, []int{}
 	}
 
 	// remove the columns
 	for i, strings := range displayStringsArr {
 		for j := len(toRemove) - 1; j >= 0; j-- {
-			strings = append(strings[:toRemove[j]], strings[toRemove[j]+1:]...)
+			strings = slices.Delete(strings, toRemove[j], toRemove[j]+1)
 		}
 		displayStringsArr[i] = strings
 	}
 
-	return displayStringsArr
+	for j := len(toRemove) - 1; j >= 0; j-- {
+		if columnAlignments != nil && toRemove[j] < len(columnAlignments) {
+			columnAlignments = slices.Delete(columnAlignments, toRemove[j], toRemove[j]+1)
+		}
+	}
+
+	return displayStringsArr, columnAlignments, toRemove
 }
 
-func getPaddedDisplayStrings(stringArrays [][]string, columnConfigs []ColumnConfig) string {
-	builder := strings.Builder{}
-	for i, stringArray := range stringArrays {
+func getPaddedDisplayStrings(stringArrays [][]string, columnConfigs []ColumnConfig) []string {
+	result := make([]string, 0, len(stringArrays))
+	for _, stringArray := range stringArrays {
 		if len(stringArray) == 0 {
 			continue
 		}
+		builder := strings.Builder{}
 		for j, columnConfig := range columnConfigs {
 			if len(stringArray)-1 < j {
 				continue
@@ -108,37 +144,44 @@ func getPaddedDisplayStrings(stringArrays [][]string, columnConfigs []ColumnConf
 			continue
 		}
 		builder.WriteString(stringArray[len(columnConfigs)])
-
-		if i < len(stringArrays)-1 {
-			builder.WriteString("\n")
-		}
+		result = append(result, builder.String())
 	}
-	return builder.String()
+	return result
 }
 
 func getPadWidths(stringArrays [][]string) []int {
-	maxWidth := slices.MaxBy(stringArrays, func(stringArray []string) int {
+	maxWidth := MaxFn(stringArrays, func(stringArray []string) int {
 		return len(stringArray)
 	})
 
 	if maxWidth-1 < 0 {
 		return []int{}
 	}
-	return slices.Map(lo.Range(maxWidth-1), func(i int) int {
-		return slices.MaxBy(stringArrays, func(stringArray []string) int {
+	return lo.Map(lo.Range(maxWidth-1), func(i int, _ int) int {
+		return MaxFn(stringArrays, func(stringArray []string) int {
 			uncoloredStr := Decolorise(stringArray[i])
 
-			return runewidth.StringWidth(uncoloredStr)
+			return StringWidth(uncoloredStr)
 		})
 	})
 }
 
+func MaxFn[T any](items []T, fn func(T) int) int {
+	max := 0
+	for _, item := range items {
+		if fn(item) > max {
+			max = fn(item)
+		}
+	}
+	return max
+}
+
 // TruncateWithEllipsis returns a string, truncated to a certain length, with an ellipsis
 func TruncateWithEllipsis(str string, limit int) string {
-	if runewidth.StringWidth(str) > limit && limit <= 3 {
+	if StringWidth(str) > limit && limit <= 2 {
 		return strings.Repeat(".", limit)
 	}
-	return runewidth.Truncate(str, limit, "...")
+	return runewidth.Truncate(str, limit, "…")
 }
 
 func SafeTruncate(str string, limit int) string {
@@ -151,9 +194,18 @@ func SafeTruncate(str string, limit int) string {
 
 const COMMIT_HASH_SHORT_SIZE = 8
 
-func ShortSha(sha string) string {
-	if len(sha) < COMMIT_HASH_SHORT_SIZE {
-		return sha
+func ShortHash(hash string) string {
+	if len(hash) < COMMIT_HASH_SHORT_SIZE {
+		return hash
 	}
-	return sha[:COMMIT_HASH_SHORT_SIZE]
+	return hash[:COMMIT_HASH_SHORT_SIZE]
+}
+
+// Returns comma-separated list of paths, with ellipsis if there are more than 3
+// e.g. "foo, bar, baz, [...3 more]"
+func FormatPaths(paths []string) string {
+	if len(paths) <= 3 {
+		return strings.Join(paths, ", ")
+	}
+	return fmt.Sprintf("%s, %s, %s, [...%d more]", paths[0], paths[1], paths[2], len(paths)-3)
 }

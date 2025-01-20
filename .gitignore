@@ -5,9 +5,7 @@
 
 # Hidden
 .*
-
-# TODO
-TODO.*
+!.codespellrc
 
 # Notes
 *.notes
@@ -22,6 +20,7 @@ lazygit.exe
 
 # Exceptions
 !.gitignore
+!.gitattributes
 !.goreleaser.yml
 !.golangci.yml
 !.circleci/
@@ -35,7 +34,12 @@ lazygit.exe
 
 test/git_server/data
 
-test/results/**
+test/_results/**
 
 oryxBuildBinary
 __debug_bin
+
+.worktrees
+demo/output/*
+
+coverage.out

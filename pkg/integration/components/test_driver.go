@@ -10,18 +10,18 @@ import (
 )
 
 type TestDriver struct {
-	gui          integrationTypes.GuiDriver
-	keys         config.KeybindingConfig
-	pushKeyDelay int
+	gui        integrationTypes.GuiDriver
+	keys       config.KeybindingConfig
+	inputDelay int
 	*assertionHelper
 	shell *Shell
 }
 
-func NewTestDriver(gui integrationTypes.GuiDriver, shell *Shell, keys config.KeybindingConfig, pushKeyDelay int) *TestDriver {
+func NewTestDriver(gui integrationTypes.GuiDriver, shell *Shell, keys config.KeybindingConfig, inputDelay int) *TestDriver {
 	return &TestDriver{
 		gui:             gui,
 		keys:            keys,
-		pushKeyDelay:    pushKeyDelay,
+		inputDelay:      inputDelay,
 		assertionHelper: &assertionHelper{gui: gui},
 		shell:           shell,
 	}
@@ -30,9 +30,23 @@ func NewTestDriver(gui integrationTypes.GuiDriver, shell *Shell, keys config.Key
 // key is something like 'w' or '<space>'. It's best not to pass a direct value,
 // but instead to go through the default user config to get a more meaningful key name
 func (self *TestDriver) press(keyStr string) {
-	self.Wait(self.pushKeyDelay)
-
+	self.SetCaption(fmt.Sprintf("Pressing %s", keyStr))
 	self.gui.PressKey(keyStr)
+	self.Wait(self.inputDelay)
+}
+
+// for use when typing or navigating, because in demos we want that to happen
+// faster
+func (self *TestDriver) pressFast(keyStr string) {
+	self.SetCaption("")
+	self.gui.PressKey(keyStr)
+	self.Wait(self.inputDelay / 5)
+}
+
+func (self *TestDriver) click(x, y int) {
+	self.SetCaption(fmt.Sprintf("Clicking %d, %d", x, y))
+	self.gui.Click(x, y)
+	self.Wait(self.inputDelay)
 }
 
 // Should only be used in specific cases where you're doing something weird!
@@ -44,7 +58,7 @@ func (self *TestDriver) GlobalPress(keyStr string) {
 
 func (self *TestDriver) typeContent(content string) {
 	for _, char := range content {
-		self.press(string(char))
+		self.pressFast(string(char))
 	}
 }
 
@@ -55,6 +69,14 @@ func (self *TestDriver) Common() *Common {
 // for when you want to allow lazygit to process something before continuing
 func (self *TestDriver) Wait(milliseconds int) {
 	time.Sleep(time.Duration(milliseconds) * time.Millisecond)
+}
+
+func (self *TestDriver) SetCaption(caption string) {
+	self.gui.SetCaption(caption)
+}
+
+func (self *TestDriver) SetCaptionPrefix(prefix string) {
+	self.gui.SetCaptionPrefix(prefix)
 }
 
 func (self *TestDriver) LogUI(message string) {
@@ -80,15 +102,26 @@ func (self *TestDriver) ExpectPopup() *Popup {
 	return &Popup{t: self}
 }
 
-func (self *TestDriver) ExpectToast(matcher *TextMatcher) {
-	self.Views().AppStatus().Content(matcher)
+func (self *TestDriver) ExpectToast(matcher *TextMatcher) *TestDriver {
+	t := self.gui.NextToast()
+	if t == nil {
+		self.gui.Fail("Expected toast, but didn't get one")
+	} else {
+		self.matchString(matcher, "Unexpected toast message",
+			func() string {
+				return *t
+			},
+		)
+	}
+
+	return self
 }
 
 func (self *TestDriver) ExpectClipboard(matcher *TextMatcher) {
 	self.assertWithRetries(func() (bool, string) {
 		text, err := clipboard.ReadAll()
 		if err != nil {
-			return false, "Error occured when reading from clipboard: " + err.Error()
+			return false, "Error occurred when reading from clipboard: " + err.Error()
 		}
 		ok, _ := matcher.test(text)
 		return ok, fmt.Sprintf("Expected clipboard to match %s, but got %s", matcher.name(), text)

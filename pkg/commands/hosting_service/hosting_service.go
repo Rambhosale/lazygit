@@ -8,9 +8,10 @@ import (
 	"github.com/go-errors/errors"
 	"github.com/jesseduffield/lazygit/pkg/i18n"
 	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 
-	"github.com/jesseduffield/generics/slices"
+	"golang.org/x/exp/slices"
 )
 
 // This package is for handling logic specific to a git hosting service like github, gitlab, bitbucket, gitea, etc.
@@ -50,13 +51,13 @@ func (self *HostingServiceMgr) GetPullRequestURL(from string, to string) (string
 	}
 }
 
-func (self *HostingServiceMgr) GetCommitURL(commitSha string) (string, error) {
+func (self *HostingServiceMgr) GetCommitURL(commitHash string) (string, error) {
 	gitService, err := self.getService()
 	if err != nil {
 		return "", err
 	}
 
-	pullRequestURL := gitService.getCommitURL(commitSha)
+	pullRequestURL := gitService.getCommitURL(commitHash)
 
 	return pullRequestURL, nil
 }
@@ -98,33 +99,30 @@ func (self *HostingServiceMgr) getCandidateServiceDomains() []ServiceDomain {
 
 	serviceDomains := slices.Clone(defaultServiceDomains)
 
-	if len(self.configServiceDomains) > 0 {
-		for gitDomain, typeAndDomain := range self.configServiceDomains {
-			splitData := strings.Split(typeAndDomain, ":")
-			if len(splitData) != 2 {
-				self.log.Errorf("Unexpected format for git service: '%s'. Expected something like 'github.com:github.com'", typeAndDomain)
-				continue
-			}
+	for gitDomain, typeAndDomain := range self.configServiceDomains {
+		provider, webDomain, success := strings.Cut(typeAndDomain, ":")
 
-			provider := splitData[0]
-			webDomain := splitData[1]
-
-			serviceDefinition, ok := serviceDefinitionByProvider[provider]
-			if !ok {
-				providerNames := slices.Map(serviceDefinitions, func(serviceDefinition ServiceDefinition) string {
-					return serviceDefinition.provider
-				})
-
-				self.log.Errorf("Unknown git service type: '%s'. Expected one of %s", provider, strings.Join(providerNames, ", "))
-				continue
-			}
-
-			serviceDomains = append(serviceDomains, ServiceDomain{
-				gitDomain:         gitDomain,
-				webDomain:         webDomain,
-				serviceDefinition: serviceDefinition,
-			})
+		// we allow for one ':' for specifying the TCP port
+		if !success || strings.Count(webDomain, ":") > 1 {
+			self.log.Errorf("Unexpected format for git service: '%s'. Expected something like 'github.com:github.com'", typeAndDomain)
+			continue
 		}
+
+		serviceDefinition, ok := serviceDefinitionByProvider[provider]
+		if !ok {
+			providerNames := lo.Map(serviceDefinitions, func(serviceDefinition ServiceDefinition, _ int) string {
+				return serviceDefinition.provider
+			})
+
+			self.log.Errorf("Unknown git service type: '%s'. Expected one of %s", provider, strings.Join(providerNames, ", "))
+			continue
+		}
+
+		serviceDomains = append(serviceDomains, ServiceDomain{
+			gitDomain:         gitDomain,
+			webDomain:         webDomain,
+			serviceDefinition: serviceDefinition,
+		})
 	}
 
 	return serviceDomains
@@ -176,8 +174,8 @@ func (self *Service) getPullRequestURLIntoTargetBranch(from string, to string) s
 	return self.resolveUrl(self.pullRequestURLIntoTargetBranch, map[string]string{"From": from, "To": to})
 }
 
-func (self *Service) getCommitURL(commitSha string) string {
-	return self.resolveUrl(self.commitURL, map[string]string{"CommitSha": commitSha})
+func (self *Service) getCommitURL(commitHash string) string {
+	return self.resolveUrl(self.commitURL, map[string]string{"CommitHash": commitHash})
 }
 
 func (self *Service) resolveUrl(templateString string, args map[string]string) string {

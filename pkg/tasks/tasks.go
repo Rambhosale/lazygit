@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
 	"github.com/jesseduffield/lazygit/pkg/utils"
 	"github.com/sasha-s/go-deadlock"
@@ -48,6 +49,12 @@ type ViewBufferManager struct {
 	refreshView  func()
 	onEndOfInput func()
 
+	// see docs/dev/Busy.md
+	// A gocui task is not the same thing as the tasks defined in this file.
+	// A gocui task simply represents the fact that lazygit is busy doing something,
+	// whereas the tasks in this file are about rendering content to a view.
+	newGocuiTask func() gocui.Task
+
 	// if the user flicks through a heap of items, with each one
 	// spawning a process to render something to the main view,
 	// it can slow things down quite a bit. In these situations we
@@ -76,6 +83,7 @@ func NewViewBufferManager(
 	refreshView func(),
 	onEndOfInput func(),
 	onNewKey func(),
+	newGocuiTask func() gocui.Task,
 ) *ViewBufferManager {
 	return &ViewBufferManager{
 		Log:          log,
@@ -85,6 +93,7 @@ func NewViewBufferManager(
 		onEndOfInput: onEndOfInput,
 		readLines:    make(chan LinesToRead, 1024),
 		onNewKey:     onNewKey,
+		newGocuiTask: newGocuiTask,
 	}
 }
 
@@ -94,13 +103,22 @@ func (self *ViewBufferManager) ReadLines(n int) {
 	})
 }
 
-// note: onDone may be called twice
-func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), prefix string, linesToRead LinesToRead, onDone func()) func(chan struct{}) error {
-	return func(stop chan struct{}) error {
-		var once sync.Once
-		var onDoneWrapper func()
-		if onDone != nil {
-			onDoneWrapper = func() { once.Do(onDone) }
+func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), prefix string, linesToRead LinesToRead, onDoneFn func()) func(TaskOpts) error {
+	return func(opts TaskOpts) error {
+		var onDoneOnce sync.Once
+		var onFirstPageShownOnce sync.Once
+
+		onFirstPageShown := func() {
+			onFirstPageShownOnce.Do(func() {
+				opts.InitialContentLoaded()
+			})
+		}
+
+		onDone := func() {
+			if onDoneFn != nil {
+				onDoneOnce.Do(onDoneFn)
+			}
+			onFirstPageShown()
 		}
 
 		if self.throttle {
@@ -109,7 +127,8 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 		}
 
 		select {
-		case <-stop:
+		case <-opts.Stop:
+			onDone()
 			return nil
 		default:
 		}
@@ -119,7 +138,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 		timeToStart := time.Since(startTime)
 
 		go utils.Safe(func() {
-			<-stop
+			<-opts.Stop
 			// we use the time it took to start the program as a way of checking if things
 			// are running slow at the moment. This is admittedly a crude estimate, but
 			// the point is that we only want to throttle when things are running slow
@@ -132,9 +151,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 			}
 
 			// for pty's we need to call onDone here so that cmd.Wait() doesn't block forever
-			if onDoneWrapper != nil {
-				onDoneWrapper()
-			}
+			onDone()
 		})
 
 		loadingMutex := deadlock.Mutex{}
@@ -145,7 +162,30 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 		done := make(chan struct{})
 
 		scanner := bufio.NewScanner(r)
-		scanner.Split(bufio.ScanLines)
+		scanner.Split(utils.ScanLinesAndTruncateWhenLongerThanBuffer(bufio.MaxScanTokenSize))
+
+		lineChan := make(chan []byte)
+		lineWrittenChan := make(chan struct{})
+
+		// We're reading from the scanner in a separate goroutine because on windows
+		// if running git through a shim, we sometimes kill the parent process without
+		// killing its children, meaning the scanner blocks forever. This solution
+		// leaves us with a dead goroutine, but it's better than blocking all
+		// rendering to main views.
+		go utils.Safe(func() {
+			defer close(lineChan)
+			for scanner.Scan() {
+				select {
+				case <-opts.Stop:
+					return
+				case lineChan <- scanner.Bytes():
+					// We need to confirm the data has been fed into the view before we
+					// pull more from the scanner because the scanner uses the same backing
+					// array and we don't want to be mutating that while it's being written
+					<-lineWrittenChan
+				}
+			}
+		})
 
 		loaded := false
 
@@ -153,7 +193,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 			ticker := time.NewTicker(time.Millisecond * 200)
 			defer ticker.Stop()
 			select {
-			case <-stop:
+			case <-opts.Stop:
 				return
 			case <-ticker.C:
 				loadingMutex.Lock()
@@ -169,8 +209,8 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 		go utils.Safe(func() {
 			isViewStale := true
 			writeToView := func(content []byte) {
-				_, _ = self.writer.Write(content)
 				isViewStale = true
+				_, _ = self.writer.Write(content)
 			}
 			refreshViewIfStale := func() {
 				if isViewStale {
@@ -182,17 +222,19 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 		outer:
 			for {
 				select {
-				case <-stop:
+				case <-opts.Stop:
 					break outer
 				case linesToRead := <-self.readLines:
 					for i := 0; i < linesToRead.Total; i++ {
+						var ok bool
+						var line []byte
 						select {
-						case <-stop:
+						case <-opts.Stop:
 							break outer
-						default:
+						case line, ok = <-lineChan:
+							break
 						}
 
-						ok := scanner.Scan()
 						loadingMutex.Lock()
 						if !loaded {
 							self.beforeStart()
@@ -209,7 +251,8 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 							self.onEndOfInput()
 							break outer
 						}
-						writeToView(append(scanner.Bytes(), '\n'))
+						writeToView(append(line, '\n'))
+						lineWrittenChan <- struct{}{}
 
 						if i+1 == linesToRead.InitialRefreshAfter {
 							// We have read enough lines to fill the view, so do a first refresh
@@ -219,6 +262,7 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 						}
 					}
 					refreshViewIfStale()
+					onFirstPageShown()
 				}
 			}
 
@@ -227,16 +271,15 @@ func (self *ViewBufferManager) NewCmdTask(start func() (*exec.Cmd, io.Reader), p
 			if err := cmd.Wait(); err != nil {
 				// it's fine if we've killed this program ourselves
 				if !strings.Contains(err.Error(), "signal: killed") {
-					self.Log.Errorf("Unexpected error when running cmd task: %v", err)
+					self.Log.Errorf("Unexpected error when running cmd task: %v; Failed command: %v %v", err, cmd.Path, cmd.Args)
 				}
 			}
 
-			// calling onDoneWrapper here again in case the program ended on its own accord
-			if onDoneWrapper != nil {
-				onDoneWrapper()
-			}
+			// calling this here again in case the program ended on its own accord
+			onDone()
 
 			close(done)
+			close(lineWrittenChan)
 		})
 
 		self.readLines <- linesToRead
@@ -272,8 +315,30 @@ func (self *ViewBufferManager) Close() {
 // 1) command based, where the manager can be asked to read more lines,  but the command can be killed
 // 2) string based, where the manager can also be asked to read more lines
 
-func (self *ViewBufferManager) NewTask(f func(stop chan struct{}) error, key string) error {
+type TaskOpts struct {
+	// Channel that tells the task to stop, because another task wants to run.
+	Stop chan struct{}
+
+	// Only for tasks which are long-running, where we read more lines sporadically.
+	// We use this to keep track of when a user's action is complete (i.e. all views
+	// have been refreshed to display the results of their action)
+	InitialContentLoaded func()
+}
+
+func (self *ViewBufferManager) NewTask(f func(TaskOpts) error, key string) error {
+	gocuiTask := self.newGocuiTask()
+
+	var completeTaskOnce sync.Once
+
+	completeGocuiTask := func() {
+		completeTaskOnce.Do(func() {
+			gocuiTask.Done()
+		})
+	}
+
 	go utils.Safe(func() {
+		defer completeGocuiTask()
+
 		self.taskIDMutex.Lock()
 		self.newTaskID++
 		taskID := self.newTaskID
@@ -286,11 +351,14 @@ func (self *ViewBufferManager) NewTask(f func(stop chan struct{}) error, key str
 		self.taskIDMutex.Unlock()
 
 		self.waitingMutex.Lock()
-		defer self.waitingMutex.Unlock()
 
+		self.taskIDMutex.Lock()
 		if taskID < self.newTaskID {
+			self.waitingMutex.Unlock()
+			self.taskIDMutex.Unlock()
 			return
 		}
+		self.taskIDMutex.Unlock()
 
 		if self.stopCurrentTask != nil {
 			self.stopCurrentTask()
@@ -307,13 +375,13 @@ func (self *ViewBufferManager) NewTask(f func(stop chan struct{}) error, key str
 
 		self.stopCurrentTask = func() { once.Do(onStop) }
 
-		go utils.Safe(func() {
-			if err := f(stop); err != nil {
-				self.Log.Error(err) // might need an onError callback
-			}
+		self.waitingMutex.Unlock()
 
-			close(notifyStopped)
-		})
+		if err := f(TaskOpts{Stop: stop, InitialContentLoaded: completeGocuiTask}); err != nil {
+			self.Log.Error(err) // might need an onError callback
+		}
+
+		close(notifyStopped)
 	})
 
 	return nil

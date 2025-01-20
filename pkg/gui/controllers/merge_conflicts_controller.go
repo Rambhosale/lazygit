@@ -17,49 +17,71 @@ type MergeConflictsController struct {
 var _ types.IController = &MergeConflictsController{}
 
 func NewMergeConflictsController(
-	common *ControllerCommon,
+	c *ControllerCommon,
 ) *MergeConflictsController {
 	return &MergeConflictsController{
 		baseController: baseController{},
-		c:              common,
+		c:              c,
 	}
 }
 
 func (self *MergeConflictsController) GetKeybindings(opts types.KeybindingsOpts) []*types.Binding {
 	bindings := []*types.Binding{
 		{
-			Key:         opts.GetKey(opts.Config.Universal.Edit),
-			Handler:     self.HandleEditFile,
-			Description: self.c.Tr.EditFile,
+			Key:             opts.GetKey(opts.Config.Universal.Select),
+			Handler:         self.withRenderAndFocus(self.HandlePickHunk),
+			Description:     self.c.Tr.PickHunk,
+			DisplayOnScreen: true,
+		},
+		{
+			Key:             opts.GetKey(opts.Config.Main.PickBothHunks),
+			Handler:         self.withRenderAndFocus(self.HandlePickAllHunks),
+			Description:     self.c.Tr.PickAllHunks,
+			DisplayOnScreen: true,
+		},
+		{
+			Key:             opts.GetKey(opts.Config.Universal.PrevItem),
+			Handler:         self.withRenderAndFocus(self.PrevConflictHunk),
+			Description:     self.c.Tr.SelectPrevHunk,
+			DisplayOnScreen: true,
+		},
+		{
+			Key:             opts.GetKey(opts.Config.Universal.NextItem),
+			Handler:         self.withRenderAndFocus(self.NextConflictHunk),
+			Description:     self.c.Tr.SelectNextHunk,
+			DisplayOnScreen: true,
+		},
+		{
+			Key:             opts.GetKey(opts.Config.Universal.PrevBlock),
+			Handler:         self.withRenderAndFocus(self.PrevConflict),
+			Description:     self.c.Tr.PrevConflict,
+			DisplayOnScreen: true,
+		},
+		{
+			Key:             opts.GetKey(opts.Config.Universal.NextBlock),
+			Handler:         self.withRenderAndFocus(self.NextConflict),
+			Description:     self.c.Tr.NextConflict,
+			DisplayOnScreen: true,
+		},
+		{
+			Key:             opts.GetKey(opts.Config.Universal.Undo),
+			Handler:         self.withRenderAndFocus(self.HandleUndo),
+			Description:     self.c.Tr.Undo,
+			Tooltip:         self.c.Tr.UndoMergeResolveTooltip,
+			DisplayOnScreen: true,
+		},
+		{
+			Key:             opts.GetKey(opts.Config.Universal.Edit),
+			Handler:         self.HandleEditFile,
+			Description:     self.c.Tr.EditFile,
+			Tooltip:         self.c.Tr.EditFileTooltip,
+			DisplayOnScreen: true,
 		},
 		{
 			Key:         opts.GetKey(opts.Config.Universal.OpenFile),
 			Handler:     self.HandleOpenFile,
 			Description: self.c.Tr.OpenFile,
-		},
-		{
-			Key:         opts.GetKey(opts.Config.Universal.PrevBlock),
-			Handler:     self.withRenderAndFocus(self.PrevConflict),
-			Description: self.c.Tr.PrevConflict,
-			Display:     true,
-		},
-		{
-			Key:         opts.GetKey(opts.Config.Universal.NextBlock),
-			Handler:     self.withRenderAndFocus(self.NextConflict),
-			Description: self.c.Tr.NextConflict,
-			Display:     true,
-		},
-		{
-			Key:         opts.GetKey(opts.Config.Universal.PrevItem),
-			Handler:     self.withRenderAndFocus(self.PrevConflictHunk),
-			Description: self.c.Tr.SelectPrevHunk,
-			Display:     true,
-		},
-		{
-			Key:         opts.GetKey(opts.Config.Universal.NextItem),
-			Handler:     self.withRenderAndFocus(self.NextConflictHunk),
-			Description: self.c.Tr.SelectNextHunk,
-			Display:     true,
+			Tooltip:     self.c.Tr.OpenFileTooltip,
 		},
 		{
 			Key:     opts.GetKey(opts.Config.Universal.PrevBlockAlt),
@@ -90,27 +112,11 @@ func (self *MergeConflictsController) GetKeybindings(opts types.KeybindingsOpts)
 			Tag:         "navigation",
 		},
 		{
-			Key:         opts.GetKey(opts.Config.Universal.Undo),
-			Handler:     self.withRenderAndFocus(self.HandleUndo),
-			Description: self.c.Tr.Undo,
-			Display:     true,
-		},
-		{
-			Key:         opts.GetKey(opts.Config.Files.OpenMergeTool),
-			Handler:     self.c.Helpers().WorkingTree.OpenMergeTool,
-			Description: self.c.Tr.OpenMergeTool,
-		},
-		{
-			Key:         opts.GetKey(opts.Config.Universal.Select),
-			Handler:     self.withRenderAndFocus(self.HandlePickHunk),
-			Description: self.c.Tr.PickHunk,
-			Display:     true,
-		},
-		{
-			Key:         opts.GetKey(opts.Config.Main.PickBothHunks),
-			Handler:     self.withRenderAndFocus(self.HandlePickAllHunks),
-			Description: self.c.Tr.PickAllHunks,
-			Display:     true,
+			Key:             opts.GetKey(opts.Config.Files.OpenMergeTool),
+			Handler:         self.c.Helpers().WorkingTree.OpenMergeTool,
+			Description:     self.c.Tr.OpenMergeTool,
+			Tooltip:         self.c.Tr.OpenMergeToolTooltip,
+			DisplayOnScreen: true,
 		},
 		{
 			Key:         opts.GetKey(opts.Config.Universal.Return),
@@ -141,34 +147,34 @@ func (self *MergeConflictsController) GetMouseKeybindings(opts types.Keybindings
 	}
 }
 
-func (self *MergeConflictsController) GetOnFocus() func(types.OnFocusOpts) error {
-	return func(types.OnFocusOpts) error {
+func (self *MergeConflictsController) GetOnFocus() func(types.OnFocusOpts) {
+	return func(types.OnFocusOpts) {
 		self.c.Views().MergeConflicts.Wrap = false
 
-		return self.c.Helpers().MergeConflicts.Render(true)
+		self.c.Helpers().MergeConflicts.Render()
+
+		self.context().SetSelectedLineRange()
 	}
 }
 
-func (self *MergeConflictsController) GetOnFocusLost() func(types.OnFocusLostOpts) error {
-	return func(types.OnFocusLostOpts) error {
+func (self *MergeConflictsController) GetOnFocusLost() func(types.OnFocusLostOpts) {
+	return func(types.OnFocusLostOpts) {
 		self.context().SetUserScrolling(false)
 		self.context().GetState().ResetConflictSelection()
 		self.c.Views().MergeConflicts.Wrap = true
-
-		return nil
 	}
 }
 
 func (self *MergeConflictsController) HandleScrollUp() error {
 	self.context().SetUserScrolling(true)
-	self.context().GetViewTrait().ScrollUp(self.c.UserConfig.Gui.ScrollHeight)
+	self.context().GetViewTrait().ScrollUp(self.c.UserConfig().Gui.ScrollHeight)
 
 	return nil
 }
 
 func (self *MergeConflictsController) HandleScrollDown() error {
 	self.context().SetUserScrolling(true)
-	self.context().GetViewTrait().ScrollDown(self.c.UserConfig.Gui.ScrollHeight)
+	self.context().GetViewTrait().ScrollDown(self.c.UserConfig().Gui.ScrollHeight)
 
 	return nil
 }
@@ -182,7 +188,8 @@ func (self *MergeConflictsController) context() *context.MergeConflictsContext {
 }
 
 func (self *MergeConflictsController) Escape() error {
-	return self.c.PopContext()
+	self.c.Context().Pop()
+	return nil
 }
 
 func (self *MergeConflictsController) HandleEditFile() error {
@@ -215,7 +222,7 @@ func (self *MergeConflictsController) HandleUndo() error {
 	}
 
 	self.c.LogAction("Restoring file to previous state")
-	self.c.LogCommand("Undoing last conflict resolution", false)
+	self.c.LogCommand(self.c.Tr.Log.HandleUndo, false)
 	if err := os.WriteFile(state.GetPath(), []byte(state.GetContent()), 0o644); err != nil {
 		return err
 	}
@@ -313,17 +320,14 @@ func (self *MergeConflictsController) onLastConflictResolved() error {
 	return self.c.Refresh(types.RefreshOptions{Mode: types.ASYNC, Scope: []types.RefreshableView{types.FILES}})
 }
 
-func (self *MergeConflictsController) isFocused() bool {
-	return self.c.CurrentContext().GetKey() == self.context().GetKey()
-}
-
 func (self *MergeConflictsController) withRenderAndFocus(f func() error) func() error {
 	return self.withLock(func() error {
 		if err := f(); err != nil {
 			return err
 		}
 
-		return self.context().RenderAndFocus(self.isFocused())
+		self.context().RenderAndFocus()
+		return nil
 	})
 }
 

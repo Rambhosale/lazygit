@@ -1,29 +1,36 @@
 linters:
-  disable:
-    - structcheck # gives false positives
   enable:
     - gofumpt
     - thelper
     - goimports
     - tparallel
     - wastedassign
-    - exportloopref
     - unparam
     - prealloc
     - unconvert
     - exhaustive
     - makezero
     - nakedret
-    # - goconst # TODO: enable and fix issues
+    - copyloopvar
   fast: false
 
 linters-settings:
+  copyloopvar:
+    # Check all assigning the loop variable to another variable.
+    # Default: false
+    # If true, an assignment like `a := x` will be detected as an error.
+    check-alias: true
   exhaustive:
     default-signifies-exhaustive: true
-
+  staticcheck:
+    # SA1019 is for checking that we're not using fields marked as deprecated
+    # in a comment. It decides this in a loose way so I'm silencing it. Also because
+    # it's tripping on our own structs.
+    checks: ["all", "-SA1019"]
   nakedret:
     # the gods will judge me but I just don't like naked returns at all
     max-func-lines: 0
 
 run:
-  go: 1.18
+  go: '1.22'
+  timeout: 10m

@@ -1,9 +1,14 @@
 package helpers
 
 import (
+	"strconv"
+
+	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/gui/modes/cherrypicking"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
+	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/samber/lo"
 )
 
 type CherryPickHelper struct {
@@ -29,66 +34,105 @@ func (self *CherryPickHelper) getData() *cherrypicking.CherryPicking {
 	return self.c.Modes().CherryPicking
 }
 
-func (self *CherryPickHelper) Copy(commit *models.Commit, commitsList []*models.Commit, context types.Context) error {
+func (self *CherryPickHelper) CopyRange(commitsList []*models.Commit, context types.IListContext) error {
+	startIdx, endIdx := context.GetList().GetSelectionRange()
+
 	if err := self.resetIfNecessary(context); err != nil {
 		return err
 	}
 
-	// we will un-copy it if it's already copied
-	if self.getData().SelectedShaSet().Includes(commit.Sha) {
-		self.getData().Remove(commit, commitsList)
+	commitSet := self.getData().SelectedHashSet()
+
+	allCommitsCopied := lo.EveryBy(commitsList[startIdx:endIdx+1], func(commit *models.Commit) bool {
+		return commitSet.Includes(commit.Hash)
+	})
+
+	// if all selected commits are already copied, we'll uncopy them
+	if allCommitsCopied {
+		for index := startIdx; index <= endIdx; index++ {
+			commit := commitsList[index]
+			self.getData().Remove(commit, commitsList)
+		}
 	} else {
-		self.getData().Add(commit, commitsList)
-	}
-
-	return self.rerender()
-}
-
-func (self *CherryPickHelper) CopyRange(selectedIndex int, commitsList []*models.Commit, context types.Context) error {
-	if err := self.resetIfNecessary(context); err != nil {
-		return err
-	}
-
-	commitSet := self.getData().SelectedShaSet()
-
-	// find the last commit that is copied that's above our position
-	// if there are none, startIndex = 0
-	startIndex := 0
-	for index, commit := range commitsList[0:selectedIndex] {
-		if commitSet.Includes(commit.Sha) {
-			startIndex = index
+		for index := startIdx; index <= endIdx; index++ {
+			commit := commitsList[index]
+			self.getData().Add(commit, commitsList)
 		}
 	}
 
-	for index := startIndex; index <= selectedIndex; index++ {
-		commit := commitsList[index]
-		self.getData().Add(commit, commitsList)
-	}
+	self.getData().DidPaste = false
 
-	return self.rerender()
+	self.rerender()
+	return nil
 }
 
 // HandlePasteCommits begins a cherry-pick rebase with the commits the user has copied.
 // Only to be called from the branch commits controller
 func (self *CherryPickHelper) Paste() error {
-	return self.c.Confirm(types.ConfirmOpts{
-		Title:  self.c.Tr.CherryPick,
-		Prompt: self.c.Tr.SureCherryPick,
+	self.c.Confirm(types.ConfirmOpts{
+		Title: self.c.Tr.CherryPick,
+		Prompt: utils.ResolvePlaceholderString(
+			self.c.Tr.SureCherryPick,
+			map[string]string{
+				"numCommits": strconv.Itoa(len(self.getData().CherryPickedCommits)),
+			}),
 		HandleConfirm: func() error {
-			return self.c.WithWaitingStatus(self.c.Tr.CherryPickingStatus, func() error {
+			isInRebase, err := self.c.Git().Status.IsInInteractiveRebase()
+			if err != nil {
+				return err
+			}
+			if isInRebase {
+				if err := self.c.Git().Rebase.CherryPickCommitsDuringRebase(self.getData().CherryPickedCommits); err != nil {
+					return err
+				}
+				err = self.c.Refresh(types.RefreshOptions{
+					Mode: types.SYNC, Scope: []types.RefreshableView{types.REBASE_COMMITS},
+				})
+				if err != nil {
+					return err
+				}
+
+				return self.Reset()
+			}
+
+			return self.c.WithWaitingStatus(self.c.Tr.CherryPickingStatus, func(gocui.Task) error {
 				self.c.LogAction(self.c.Tr.Actions.CherryPick)
 				err := self.c.Git().Rebase.CherryPickCommits(self.getData().CherryPickedCommits)
-				return self.rebaseHelper.CheckMergeOrRebase(err)
+				err = self.rebaseHelper.CheckMergeOrRebase(err)
+				if err != nil {
+					return err
+				}
+
+				// If we're in an interactive rebase at this point, it must
+				// be because there were conflicts. Don't clear the copied
+				// commits in this case, since we might want to abort and
+				// try pasting them again.
+				isInRebase, err = self.c.Git().Status.IsInInteractiveRebase()
+				if err != nil {
+					return err
+				}
+				if !isInRebase {
+					self.getData().DidPaste = true
+					self.rerender()
+				}
+				return nil
 			})
 		},
 	})
+
+	return nil
+}
+
+func (self *CherryPickHelper) CanPaste() bool {
+	return self.getData().CanPaste()
 }
 
 func (self *CherryPickHelper) Reset() error {
 	self.getData().ContextKey = ""
 	self.getData().CherryPickedCommits = nil
 
-	return self.rerender()
+	self.rerender()
+	return nil
 }
 
 // you can only copy from one context at a time, because the order and position of commits matter
@@ -104,16 +148,12 @@ func (self *CherryPickHelper) resetIfNecessary(context types.Context) error {
 	return nil
 }
 
-func (self *CherryPickHelper) rerender() error {
+func (self *CherryPickHelper) rerender() {
 	for _, context := range []types.Context{
 		self.c.Contexts().LocalCommits,
 		self.c.Contexts().ReflogCommits,
 		self.c.Contexts().SubCommits,
 	} {
-		if err := self.c.PostRefreshUpdate(context); err != nil {
-			return err
-		}
+		self.c.PostRefreshUpdate(context)
 	}
-
-	return nil
 }

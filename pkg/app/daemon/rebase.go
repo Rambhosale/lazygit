@@ -5,11 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/fsmiamoto/git-todo-parser/todo"
-	"github.com/jesseduffield/generics/slices"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/common"
 	"github.com/jesseduffield/lazygit/pkg/env"
+	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/samber/lo"
+	"github.com/stefanhaller/git-todo-parser/todo"
 )
 
 type TodoLine struct {
@@ -21,20 +22,20 @@ func (self *TodoLine) ToString() string {
 	if self.Action == "break" {
 		return self.Action + "\n"
 	} else {
-		return self.Action + " " + self.Commit.Sha + " " + self.Commit.Name + "\n"
+		return self.Action + " " + self.Commit.Hash + " " + self.Commit.Name + "\n"
 	}
 }
 
 func TodoLinesToString(todoLines []TodoLine) string {
-	lines := slices.Map(todoLines, func(todoLine TodoLine) string {
+	lines := lo.Map(todoLines, func(todoLine TodoLine, _ int) string {
 		return todoLine.ToString()
 	})
 
-	return strings.Join(slices.Reverse(lines), "")
+	return strings.Join(lo.Reverse(lines), "")
 }
 
 type ChangeTodoAction struct {
-	Sha       string
+	Hash      string
 	NewAction todo.TodoCommand
 }
 
@@ -44,6 +45,10 @@ func handleInteractiveRebase(common *common.Common, f func(path string) error) e
 	path := os.Args[1]
 
 	if strings.HasSuffix(path, "git-rebase-todo") {
+		err := utils.RemoveUpdateRefsForCopiedBranch(path, getCommentChar())
+		if err != nil {
+			return err
+		}
 		return f(path)
 	} else if strings.HasSuffix(path, filepath.Join(gitDir(), "COMMIT_EDITMSG")) { // TODO: test
 		// if we are rebasing and squashing, we'll see a COMMIT_EDITMSG

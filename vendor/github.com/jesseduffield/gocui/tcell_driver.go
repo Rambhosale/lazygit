@@ -81,7 +81,7 @@ func registerRuneFallbacks(s tcell.Screen, additional map[rune]string) {
 }
 
 // tcellInitSimulation initializes tcell screen for use.
-func (g *Gui) tcellInitSimulation() error {
+func (g *Gui) tcellInitSimulation(width int, height int) error {
 	s := tcell.NewSimulationScreen("")
 	if e := s.Init(); e != nil {
 		return e
@@ -90,7 +90,7 @@ func (g *Gui) tcellInitSimulation() error {
 		Screen = s
 		// setting to a larger value than the typical terminal size
 		// so that during a test we're more likely to see an item to select in a view.
-		s.SetSize(100, 100)
+		s.SetSize(width, height)
 		s.Sync()
 		return nil
 	}
@@ -154,18 +154,20 @@ type gocuiEventType uint8
 //	The 'Mod', 'Key' and 'Ch' fields are valid if 'Type' is 'eventKey'.
 //	The 'MouseX' and 'MouseY' fields are valid if 'Type' is 'eventMouse'.
 //	The 'Width' and 'Height' fields are valid if 'Type' is 'eventResize'.
+//	The 'Focused' field is valid if 'Type' is 'eventFocus'.
 //	The 'Err' field is valid if 'Type' is 'eventError'.
 type GocuiEvent struct {
-	Type   gocuiEventType
-	Mod    Modifier
-	Key    Key
-	Ch     rune
-	Width  int
-	Height int
-	Err    error
-	MouseX int
-	MouseY int
-	N      int
+	Type    gocuiEventType
+	Mod     Modifier
+	Key     Key
+	Ch      rune
+	Width   int
+	Height  int
+	Err     error
+	MouseX  int
+	MouseY  int
+	Focused bool
+	N       int
 }
 
 // Event types.
@@ -174,6 +176,8 @@ const (
 	eventKey
 	eventResize
 	eventMouse
+	eventMouseMove // only used when no button is down, otherwise it's eventMouse
+	eventFocus
 	eventInterrupt
 	eventError
 	eventRaw
@@ -214,6 +218,29 @@ func (wrapper TcellKeyEventWrapper) toTcellEvent() tcell.Event {
 	return tcell.NewEventKey(wrapper.Key, wrapper.Ch, wrapper.Mod)
 }
 
+type TcellMouseEventWrapper struct {
+	Timestamp  int64
+	X          int
+	Y          int
+	ButtonMask tcell.ButtonMask
+	ModMask    tcell.ModMask
+}
+
+func NewTcellMouseEventWrapper(event *tcell.EventMouse, timestamp int64) *TcellMouseEventWrapper {
+	x, y := event.Position()
+	return &TcellMouseEventWrapper{
+		Timestamp:  timestamp,
+		X:          x,
+		Y:          y,
+		ButtonMask: event.Buttons(),
+		ModMask:    event.Modifiers(),
+	}
+}
+
+func (wrapper TcellMouseEventWrapper) toTcellEvent() tcell.Event {
+	return tcell.NewEventMouse(wrapper.X, wrapper.Y, wrapper.ButtonMask, wrapper.ModMask)
+}
+
 type TcellResizeEventWrapper struct {
 	Timestamp int64
 	Width     int
@@ -242,6 +269,8 @@ func (g *Gui) pollEvent() GocuiEvent {
 		case ev := <-g.ReplayedEvents.Keys:
 			tev = (ev).toTcellEvent()
 		case ev := <-g.ReplayedEvents.Resizes:
+			tev = (ev).toTcellEvent()
+		case ev := <-g.ReplayedEvents.MouseEvents:
 			tev = (ev).toTcellEvent()
 		}
 	} else {
@@ -272,6 +301,14 @@ func (g *Gui) pollEvent() GocuiEvent {
 			mod = 0
 			ch = rune(0)
 			k = tcell.KeyCtrlSpace
+		} else if mod == tcell.ModShift && k == tcell.KeyUp {
+			mod = 0
+			ch = rune(0)
+			k = tcell.KeyF62
+		} else if mod == tcell.ModShift && k == tcell.KeyDown {
+			mod = 0
+			ch = rune(0)
+			k = tcell.KeyF63
 		} else if mod == tcell.ModCtrl || mod == tcell.ModShift {
 			// remove Ctrl or Shift if specified
 			// - shift - will be translated to the final code of rune
@@ -327,6 +364,7 @@ func (g *Gui) pollEvent() GocuiEvent {
 				mouseKey = MouseRight
 			case tcell.ButtonMiddle:
 				mouseKey = MouseMiddle
+			default:
 			}
 		}
 
@@ -338,17 +376,23 @@ func (g *Gui) pollEvent() GocuiEvent {
 					dragState = NOT_DRAGGING
 				case tcell.ButtonSecondary:
 				case tcell.ButtonMiddle:
+				default:
 				}
 				mouseMod = Modifier(lastMouseMod)
 				lastMouseMod = tcell.ModNone
 				lastMouseKey = tcell.ButtonNone
 			}
+		default:
 		}
 
 		if !wheeling {
 			switch dragState {
 			case NOT_DRAGGING:
-				return GocuiEvent{Type: eventNone}
+				return GocuiEvent{
+					Type:   eventMouseMove,
+					MouseX: x,
+					MouseY: y,
+				}
 			// if we haven't released the left mouse button and we've moved the cursor then we're dragging
 			case MAYBE_DRAGGING:
 				if x != lastX || y != lastY {
@@ -367,6 +411,11 @@ func (g *Gui) pollEvent() GocuiEvent {
 			Key:    mouseKey,
 			Ch:     0,
 			Mod:    mouseMod,
+		}
+	case *tcell.EventFocus:
+		return GocuiEvent{
+			Type:    eventFocus,
+			Focused: tev.Focused,
 		}
 	default:
 		return GocuiEvent{Type: eventNone}

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jesseduffield/lazygit/pkg/secureexec"
+	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/utils"
 )
 
@@ -26,6 +26,10 @@ func TestNewCmdTaskInstantStop(t *testing.T) {
 	onEndOfInput, getOnEndOfInputCallCount := getCounter()
 	onNewKey, getOnNewKeyCallCount := getCounter()
 	onDone, getOnDoneCallCount := getCounter()
+	task := gocui.NewFakeTask()
+	newTask := func() gocui.Task {
+		return task
+	}
 
 	manager := NewViewBufferManager(
 		utils.NewDummyLog(),
@@ -34,13 +38,14 @@ func TestNewCmdTaskInstantStop(t *testing.T) {
 		refreshView,
 		onEndOfInput,
 		onNewKey,
+		newTask,
 	)
 
 	stop := make(chan struct{})
 	reader := bytes.NewBufferString("test")
 	start := func() (*exec.Cmd, io.Reader) {
 		// not actually starting this because it's not necessary
-		cmd := secureexec.Command("blah blah")
+		cmd := exec.Command("blah")
 
 		close(stop)
 
@@ -49,7 +54,7 @@ func TestNewCmdTaskInstantStop(t *testing.T) {
 
 	fn := manager.NewCmdTask(start, "prefix\n", LinesToRead{20, -1}, onDone)
 
-	_ = fn(stop)
+	_ = fn(TaskOpts{Stop: stop, InitialContentLoaded: func() { task.Done() }})
 
 	callCountExpectations := []struct {
 		expected int
@@ -68,6 +73,10 @@ func TestNewCmdTaskInstantStop(t *testing.T) {
 		}
 	}
 
+	if task.Status() != gocui.TaskStatusDone {
+		t.Errorf("expected task status to be 'done', got '%s'", task.FormatStatus())
+	}
+
 	expectedContent := ""
 	actualContent := writer.String()
 	if actualContent != expectedContent {
@@ -82,6 +91,10 @@ func TestNewCmdTask(t *testing.T) {
 	onEndOfInput, getOnEndOfInputCallCount := getCounter()
 	onNewKey, getOnNewKeyCallCount := getCounter()
 	onDone, getOnDoneCallCount := getCounter()
+	task := gocui.NewFakeTask()
+	newTask := func() gocui.Task {
+		return task
+	}
 
 	manager := NewViewBufferManager(
 		utils.NewDummyLog(),
@@ -90,13 +103,14 @@ func TestNewCmdTask(t *testing.T) {
 		refreshView,
 		onEndOfInput,
 		onNewKey,
+		newTask,
 	)
 
 	stop := make(chan struct{})
 	reader := bytes.NewBufferString("test")
 	start := func() (*exec.Cmd, io.Reader) {
 		// not actually starting this because it's not necessary
-		cmd := secureexec.Command("blah blah")
+		cmd := exec.Command("blah")
 
 		return cmd, reader
 	}
@@ -109,7 +123,7 @@ func TestNewCmdTask(t *testing.T) {
 		close(stop)
 		wg.Done()
 	}()
-	_ = fn(stop)
+	_ = fn(TaskOpts{Stop: stop, InitialContentLoaded: func() { task.Done() }})
 
 	wg.Wait()
 
@@ -128,6 +142,10 @@ func TestNewCmdTask(t *testing.T) {
 		if expectation.actual != expectation.expected {
 			t.Errorf("expected %s to be called %d times, got %d", expectation.name, expectation.expected, expectation.actual)
 		}
+	}
+
+	if task.Status() != gocui.TaskStatusDone {
+		t.Errorf("expected task status to be 'done', got '%s'", task.FormatStatus())
 	}
 
 	expectedContent := "prefix\ntest\n"
@@ -208,6 +226,11 @@ func TestNewCmdTaskRefresh(t *testing.T) {
 			lineCountsOnRefresh = append(lineCountsOnRefresh, strings.Count(writer.String(), "\n"))
 		}
 
+		task := gocui.NewFakeTask()
+		newTask := func() gocui.Task {
+			return task
+		}
+
 		manager := NewViewBufferManager(
 			utils.NewDummyLog(),
 			writer,
@@ -215,13 +238,14 @@ func TestNewCmdTaskRefresh(t *testing.T) {
 			refreshView,
 			func() {},
 			func() {},
+			newTask,
 		)
 
 		stop := make(chan struct{})
 		reader := BlankLineReader{totalLinesToYield: s.totalTaskLines}
 		start := func() (*exec.Cmd, io.Reader) {
 			// not actually starting this because it's not necessary
-			cmd := secureexec.Command("blah blah")
+			cmd := exec.Command("blah")
 
 			return cmd, &reader
 		}
@@ -234,7 +258,7 @@ func TestNewCmdTaskRefresh(t *testing.T) {
 			close(stop)
 			wg.Done()
 		}()
-		_ = fn(stop)
+		_ = fn(TaskOpts{Stop: stop, InitialContentLoaded: func() { task.Done() }})
 
 		wg.Wait()
 

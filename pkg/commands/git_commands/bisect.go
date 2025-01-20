@@ -19,12 +19,16 @@ func NewBisectCommands(gitCommon *GitCommon) *BisectCommands {
 // This command is pretty cheap to run so we're not storing the result anywhere.
 // But if it becomes problematic we can chang that.
 func (self *BisectCommands) GetInfo() *BisectInfo {
+	return self.GetInfoForGitDir(self.repoPaths.WorktreeGitDirPath())
+}
+
+func (self *BisectCommands) GetInfoForGitDir(gitDir string) *BisectInfo {
 	var err error
 	info := &BisectInfo{started: false, log: self.Log, newTerm: "bad", oldTerm: "good"}
 	// we return nil if we're not in a git bisect session.
 	// we know we're in a session by the presence of a .git/BISECT_START file
 
-	bisectStartPath := filepath.Join(self.dotGitDir, "BISECT_START")
+	bisectStartPath := filepath.Join(gitDir, "BISECT_START")
 	exists, err := self.os.FileExists(bisectStartPath)
 	if err != nil {
 		self.Log.Infof("error getting git bisect info: %s", err.Error())
@@ -44,7 +48,7 @@ func (self *BisectCommands) GetInfo() *BisectInfo {
 	info.started = true
 	info.start = strings.TrimSpace(string(startContent))
 
-	termsContent, err := os.ReadFile(filepath.Join(self.dotGitDir, "BISECT_TERMS"))
+	termsContent, err := os.ReadFile(filepath.Join(gitDir, "BISECT_TERMS"))
 	if err != nil {
 		// old git versions won't have this file so we default to bad/good
 	} else {
@@ -53,7 +57,7 @@ func (self *BisectCommands) GetInfo() *BisectInfo {
 		info.oldTerm = splitContent[1]
 	}
 
-	bisectRefsDir := filepath.Join(self.dotGitDir, "refs", "bisect")
+	bisectRefsDir := filepath.Join(gitDir, "refs", "bisect")
 	files, err := os.ReadDir(bisectRefsDir)
 	if err != nil {
 		self.Log.Infof("error getting git bisect info: %s", err.Error())
@@ -72,7 +76,7 @@ func (self *BisectCommands) GetInfo() *BisectInfo {
 			return info
 		}
 
-		sha := strings.TrimSpace(string(fileContent))
+		hash := strings.TrimSpace(string(fileContent))
 
 		if name == info.newTerm {
 			status = BisectStatusNew
@@ -82,16 +86,16 @@ func (self *BisectCommands) GetInfo() *BisectInfo {
 			status = BisectStatusSkipped
 		}
 
-		info.statusMap[sha] = status
+		info.statusMap[hash] = status
 	}
 
-	currentContent, err := os.ReadFile(filepath.Join(self.dotGitDir, "BISECT_EXPECTED_REV"))
+	currentContent, err := os.ReadFile(filepath.Join(gitDir, "BISECT_EXPECTED_REV"))
 	if err != nil {
 		self.Log.Infof("error getting git bisect info: %s", err.Error())
 		return info
 	}
-	currentSha := strings.TrimSpace(string(currentContent))
-	info.current = currentSha
+	currentHash := strings.TrimSpace(string(currentContent))
+	info.current = currentHash
 
 	return info
 }
@@ -121,8 +125,17 @@ func (self *BisectCommands) Start() error {
 	return self.cmd.New(cmdArgs).StreamOutput().Run()
 }
 
+func (self *BisectCommands) StartWithTerms(oldTerm string, newTerm string) error {
+	cmdArgs := NewGitCmd("bisect").Arg("start").
+		Arg("--term-old=" + oldTerm).
+		Arg("--term-new=" + newTerm).
+		ToArgv()
+
+	return self.cmd.New(cmdArgs).StreamOutput().Run()
+}
+
 // tells us whether we've found our problem commit(s). We return a string slice of
-// commit sha's if we're done, and that slice may have more that one item if
+// commit hashes if we're done, and that slice may have more that one item if
 // skipped commits are involved.
 func (self *BisectCommands) IsDone() (bool, []string, error) {
 	info := self.GetInfo()
@@ -130,8 +143,8 @@ func (self *BisectCommands) IsDone() (bool, []string, error) {
 		return false, nil, nil
 	}
 
-	newSha := info.GetNewSha()
-	if newSha == "" {
+	newHash := info.GetNewHash()
+	if newHash == "" {
 		return false, nil, nil
 	}
 
@@ -140,14 +153,14 @@ func (self *BisectCommands) IsDone() (bool, []string, error) {
 	done := false
 	candidates := []string{}
 
-	cmdArgs := NewGitCmd("rev-list").Arg(newSha).ToArgv()
+	cmdArgs := NewGitCmd("rev-list").Arg(newHash).ToArgv()
 	err := self.cmd.New(cmdArgs).RunAndProcessLines(func(line string) (bool, error) {
-		sha := strings.TrimSpace(line)
+		hash := strings.TrimSpace(line)
 
-		if status, ok := info.statusMap[sha]; ok {
+		if status, ok := info.statusMap[hash]; ok {
 			switch status {
 			case BisectStatusSkipped, BisectStatusNew:
-				candidates = append(candidates, sha)
+				candidates = append(candidates, hash)
 				return false, nil
 			case BisectStatusOld:
 				done = true
@@ -172,7 +185,7 @@ func (self *BisectCommands) IsDone() (bool, []string, error) {
 // render the commits from the bad commit.
 func (self *BisectCommands) ReachableFromStart(bisectInfo *BisectInfo) bool {
 	cmdArgs := NewGitCmd("merge-base").
-		Arg("--is-ancestor", bisectInfo.GetNewSha(), bisectInfo.GetStartSha()).
+		Arg("--is-ancestor", bisectInfo.GetNewHash(), bisectInfo.GetStartHash()).
 		ToArgv()
 
 	err := self.cmd.New(cmdArgs).DontLog().Run()

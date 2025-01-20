@@ -13,11 +13,17 @@ import (
 type IntegrationTest interface {
 	Run(GuiDriver)
 	SetupConfig(config *config.AppConfig)
+	RequiresHeadless() bool
+	// width and height when running headless
+	HeadlessDimensions() (int, int)
+	// If true, we are recording/replaying a demo
+	IsDemo() bool
 }
 
 // this is the interface through which our integration tests interact with the lazygit gui
 type GuiDriver interface {
 	PressKey(string)
+	Click(int, int)
 	Keys() config.KeybindingConfig
 	CurrentContext() types.Context
 	ContextForView(viewName string) types.Context
@@ -35,4 +41,10 @@ type GuiDriver interface {
 	// e.g. when we're showing both staged and unstaged changes
 	SecondaryView() *gocui.View
 	View(viewName string) *gocui.View
+	SetCaption(caption string)
+	SetCaptionPrefix(prefix string)
+	// Pop the next toast that was displayed; returns nil if there was none
+	NextToast() *string
+	CheckAllToastsAcknowledged()
+	Headless() bool
 }

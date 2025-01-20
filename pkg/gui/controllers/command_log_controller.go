@@ -12,11 +12,11 @@ type CommandLogController struct {
 var _ types.IController = &CommandLogController{}
 
 func NewCommandLogController(
-	common *ControllerCommon,
+	c *ControllerCommon,
 ) *CommandLogController {
 	return &CommandLogController{
 		baseController: baseController{},
-		c:              common,
+		c:              c,
 	}
 }
 
@@ -26,10 +26,9 @@ func (self *CommandLogController) GetKeybindings(opts types.KeybindingsOpts) []*
 	return bindings
 }
 
-func (self *CommandLogController) GetOnFocusLost() func(types.OnFocusLostOpts) error {
-	return func(types.OnFocusLostOpts) error {
+func (self *CommandLogController) GetOnFocusLost() func(types.OnFocusLostOpts) {
+	return func(types.OnFocusLostOpts) {
 		self.c.Views().Extras.Autoscroll = true
-		return nil
 	}
 }
 

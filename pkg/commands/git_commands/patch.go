@@ -1,17 +1,15 @@
 package git_commands
 
 import (
-	"fmt"
 	"path/filepath"
 	"time"
 
-	"github.com/fsmiamoto/git-todo-parser/todo"
 	"github.com/go-errors/errors"
 	"github.com/jesseduffield/lazygit/pkg/app/daemon"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
 	"github.com/jesseduffield/lazygit/pkg/commands/patch"
 	"github.com/jesseduffield/lazygit/pkg/commands/types/enums"
-	"github.com/jesseduffield/lazygit/pkg/utils"
+	"github.com/stefanhaller/git-todo-parser/todo"
 )
 
 type PatchCommands struct {
@@ -49,8 +47,8 @@ type ApplyPatchOpts struct {
 	Reverse  bool
 }
 
-func (self *PatchCommands) ApplyCustomPatch(reverse bool) error {
-	patch := self.PatchBuilder.PatchToApply(reverse)
+func (self *PatchCommands) ApplyCustomPatch(reverse bool, turnAddedFilesIntoDiffAgainstEmptyFile bool) error {
+	patch := self.PatchBuilder.PatchToApply(reverse, turnAddedFilesIntoDiffAgainstEmptyFile)
 
 	return self.ApplyPatch(patch, ApplyPatchOpts{
 		Index:    true,
@@ -81,7 +79,7 @@ func (self *PatchCommands) applyPatchFile(filepath string, opts ApplyPatchOpts) 
 }
 
 func (self *PatchCommands) SaveTemporaryPatch(patch string) (string, error) {
-	filepath := filepath.Join(self.os.GetTempDir(), utils.GetCurrentRepoName(), time.Now().Format("Jan _2 15.04.05.000000000")+".patch")
+	filepath := filepath.Join(self.os.GetTempDir(), self.repoPaths.RepoName(), time.Now().Format("Jan _2 15.04.05.000000000")+".patch")
 	self.Log.Infof("saving temporary patch to %s", filepath)
 	if err := self.os.CreateFileWithContent(filepath, patch); err != nil {
 		return "", err
@@ -96,7 +94,7 @@ func (self *PatchCommands) DeletePatchesFromCommit(commits []*models.Commit, com
 	}
 
 	// apply each patch in reverse
-	if err := self.ApplyCustomPatch(true); err != nil {
+	if err := self.ApplyCustomPatch(true, true); err != nil {
 		_ = self.rebase.AbortRebase()
 		return err
 	}
@@ -125,7 +123,7 @@ func (self *PatchCommands) MovePatchToSelectedCommit(commits []*models.Commit, s
 		}
 
 		// apply each patch forward
-		if err := self.ApplyCustomPatch(false); err != nil {
+		if err := self.ApplyCustomPatch(false, false); err != nil {
 			// Don't abort the rebase here; this might cause conflicts, so give
 			// the user a chance to resolve them
 			return err
@@ -159,13 +157,13 @@ func (self *PatchCommands) MovePatchToSelectedCommit(commits []*models.Commit, s
 	baseIndex := sourceCommitIdx + 1
 
 	changes := []daemon.ChangeTodoAction{
-		{Sha: commits[sourceCommitIdx].Sha, NewAction: todo.Edit},
-		{Sha: commits[destinationCommitIdx].Sha, NewAction: todo.Edit},
+		{Hash: commits[sourceCommitIdx].Hash, NewAction: todo.Edit},
+		{Hash: commits[destinationCommitIdx].Hash, NewAction: todo.Edit},
 	}
 	self.os.LogCommand(logTodoChanges(changes), false)
 
 	err := self.rebase.PrepareInteractiveRebaseCommand(PrepareInteractiveRebaseCommandOpts{
-		baseShaOrRoot:  commits[baseIndex].Sha,
+		baseHashOrRoot: commits[baseIndex].Hash,
 		overrideEditor: true,
 		instruction:    daemon.NewChangeTodoActionsInstruction(changes),
 	}).Run()
@@ -174,7 +172,7 @@ func (self *PatchCommands) MovePatchToSelectedCommit(commits []*models.Commit, s
 	}
 
 	// apply each patch in reverse
-	if err := self.ApplyCustomPatch(true); err != nil {
+	if err := self.ApplyCustomPatch(true, true); err != nil {
 		_ = self.rebase.AbortRebase()
 		return err
 	}
@@ -221,7 +219,7 @@ func (self *PatchCommands) MovePatchToSelectedCommit(commits []*models.Commit, s
 
 func (self *PatchCommands) MovePatchIntoIndex(commits []*models.Commit, commitIdx int, stash bool) error {
 	if stash {
-		if err := self.stash.Save(self.Tr.StashPrefix + commits[commitIdx].Sha); err != nil {
+		if err := self.stash.Push(self.Tr.StashPrefix + commits[commitIdx].Hash); err != nil {
 			return err
 		}
 	}
@@ -230,7 +228,7 @@ func (self *PatchCommands) MovePatchIntoIndex(commits []*models.Commit, commitId
 		return err
 	}
 
-	if err := self.ApplyCustomPatch(true); err != nil {
+	if err := self.ApplyCustomPatch(true, true); err != nil {
 		if self.status.WorkingTreeState() == enums.REBASE_MODE_REBASING {
 			_ = self.rebase.AbortRebase()
 		}
@@ -274,12 +272,17 @@ func (self *PatchCommands) MovePatchIntoIndex(commits []*models.Commit, commitId
 	return self.rebase.ContinueRebase()
 }
 
-func (self *PatchCommands) PullPatchIntoNewCommit(commits []*models.Commit, commitIdx int) error {
+func (self *PatchCommands) PullPatchIntoNewCommit(
+	commits []*models.Commit,
+	commitIdx int,
+	commitSummary string,
+	commitDescription string,
+) error {
 	if err := self.rebase.BeginInteractiveRebaseForCommit(commits, commitIdx, false); err != nil {
 		return err
 	}
 
-	if err := self.ApplyCustomPatch(true); err != nil {
+	if err := self.ApplyCustomPatch(true, true); err != nil {
 		_ = self.rebase.AbortRebase()
 		return err
 	}
@@ -300,9 +303,7 @@ func (self *PatchCommands) PullPatchIntoNewCommit(commits []*models.Commit, comm
 		return err
 	}
 
-	head_message, _ := self.commit.GetHeadCommitMessage()
-	new_message := fmt.Sprintf("Split from \"%s\"", head_message)
-	if err := self.commit.CommitCmdObj(new_message).Run(); err != nil {
+	if err := self.commit.CommitCmdObj(commitSummary, commitDescription).Run(); err != nil {
 		return err
 	}
 
@@ -320,7 +321,11 @@ func (self *PatchCommands) PullPatchIntoNewCommit(commits []*models.Commit, comm
 // only some lines of a range of adjacent added lines. To solve this, we
 // get the diff of HEAD and the original commit and then apply that.
 func (self *PatchCommands) diffHeadAgainstCommit(commit *models.Commit) (string, error) {
-	cmdArgs := NewGitCmd("diff").Arg("HEAD.." + commit.Sha).ToArgv()
+	cmdArgs := NewGitCmd("diff").
+		Config("diff.noprefix=false").
+		Arg("--no-ext-diff").
+		Arg("HEAD.." + commit.Hash).
+		ToArgv()
 
 	return self.cmd.New(cmdArgs).RunWithOutput()
 }

@@ -67,7 +67,6 @@ func TestRebaseRebaseBranch(t *testing.T) {
 	}
 
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			instance := buildRebaseCommands(commonDeps{runner: s.runner, gitVersion: s.gitVersion})
 			s.test(instance.RebaseBranch(s.arg))
@@ -79,7 +78,7 @@ func TestRebaseRebaseBranch(t *testing.T) {
 // environment variables that suppress an interactive editor
 func TestRebaseSkipEditorCommand(t *testing.T) {
 	cmdArgs := []string{"git", "blah"}
-	runner := oscommands.NewFakeRunner(t).ExpectFunc(func(cmdObj oscommands.ICmdObj) (string, error) {
+	runner := oscommands.NewFakeRunner(t).ExpectFunc("matches editor env var", func(cmdObj oscommands.ICmdObj) bool {
 		assert.EqualValues(t, cmdArgs, cmdObj.Args())
 		envVars := cmdObj.GetEnvVars()
 		for _, regexStr := range []string{
@@ -89,16 +88,15 @@ func TestRebaseSkipEditorCommand(t *testing.T) {
 			`^GIT_SEQUENCE_EDITOR=.*$`,
 			"^" + daemon.DaemonKindEnvKey + "=" + strconv.Itoa(int(daemon.DaemonKindExitImmediately)) + "$",
 		} {
-			regexStr := regexStr
 			foundMatch := lo.ContainsBy(envVars, func(envVar string) bool {
 				return regexp.MustCompile(regexStr).MatchString(envVar)
 			})
 			if !foundMatch {
-				t.Errorf("expected environment variable %s to be set", regexStr)
+				return false
 			}
 		}
-		return "", nil
-	})
+		return true
+	}, "", nil)
 	instance := buildRebaseCommands(commonDeps{runner: runner})
 	err := instance.runSkipEditorCommand(instance.cmd.New(cmdArgs))
 	assert.NoError(t, err)
@@ -111,7 +109,7 @@ func TestRebaseDiscardOldFileChanges(t *testing.T) {
 		gitConfigMockResponses map[string]string
 		commits                []*models.Commit
 		commitIndex            int
-		fileName               string
+		fileName               []string
 		runner                 *oscommands.FakeCmdObjRunner
 		test                   func(error)
 	}
@@ -122,7 +120,7 @@ func TestRebaseDiscardOldFileChanges(t *testing.T) {
 			gitConfigMockResponses: nil,
 			commits:                []*models.Commit{},
 			commitIndex:            0,
-			fileName:               "test999.txt",
+			fileName:               []string{"test999.txt"},
 			runner:                 oscommands.NewFakeRunner(t),
 			test: func(err error) {
 				assert.Error(t, err)
@@ -131,9 +129,9 @@ func TestRebaseDiscardOldFileChanges(t *testing.T) {
 		{
 			testName:               "returns error when using gpg",
 			gitConfigMockResponses: map[string]string{"commit.gpgsign": "true"},
-			commits:                []*models.Commit{{Name: "commit", Sha: "123456"}},
+			commits:                []*models.Commit{{Name: "commit", Hash: "123456"}},
 			commitIndex:            0,
-			fileName:               "test999.txt",
+			fileName:               []string{"test999.txt"},
 			runner:                 oscommands.NewFakeRunner(t),
 			test: func(err error) {
 				assert.Error(t, err)
@@ -143,11 +141,11 @@ func TestRebaseDiscardOldFileChanges(t *testing.T) {
 			testName:               "checks out file if it already existed",
 			gitConfigMockResponses: nil,
 			commits: []*models.Commit{
-				{Name: "commit", Sha: "123456"},
-				{Name: "commit2", Sha: "abcdef"},
+				{Name: "commit", Hash: "123456"},
+				{Name: "commit2", Hash: "abcdef"},
 			},
 			commitIndex: 0,
-			fileName:    "test999.txt",
+			fileName:    []string{"test999.txt"},
 			runner: oscommands.NewFakeRunner(t).
 				ExpectGitArgs([]string{"rebase", "--interactive", "--autostash", "--keep-empty", "--no-autosquash", "--rebase-merges", "abcdef"}, "", nil).
 				ExpectGitArgs([]string{"cat-file", "-e", "HEAD^:test999.txt"}, "", nil).
@@ -163,7 +161,6 @@ func TestRebaseDiscardOldFileChanges(t *testing.T) {
 	}
 
 	for _, s := range scenarios {
-		s := s
 		t.Run(s.testName, func(t *testing.T) {
 			instance := buildRebaseCommands(commonDeps{
 				runner:     s.runner,

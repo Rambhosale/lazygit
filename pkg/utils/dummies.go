@@ -7,6 +7,7 @@ import (
 	"github.com/jesseduffield/lazygit/pkg/config"
 	"github.com/jesseduffield/lazygit/pkg/i18n"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/afero"
 )
 
 // NewDummyLog creates a new dummy Log for testing
@@ -18,18 +19,25 @@ func NewDummyLog() *logrus.Entry {
 
 func NewDummyCommon() *common.Common {
 	tr := i18n.EnglishTranslationSet()
-	return &common.Common{
-		Log:        NewDummyLog(),
-		Tr:         &tr,
-		UserConfig: config.GetDefaultConfig(),
+	cmn := &common.Common{
+		Log: NewDummyLog(),
+		Tr:  tr,
+		Fs:  afero.NewOsFs(),
 	}
+	cmn.SetUserConfig(config.GetDefaultConfig())
+	return cmn
 }
 
-func NewDummyCommonWithUserConfig(userConfig *config.UserConfig) *common.Common {
+func NewDummyCommonWithUserConfigAndAppState(userConfig *config.UserConfig, appState *config.AppState) *common.Common {
 	tr := i18n.EnglishTranslationSet()
-	return &common.Common{
-		Log:        NewDummyLog(),
-		Tr:         &tr,
-		UserConfig: userConfig,
+	cmn := &common.Common{
+		Log:      NewDummyLog(),
+		Tr:       tr,
+		AppState: appState,
+		// TODO: remove dependency on actual filesystem in tests and switch to using
+		// in-memory for everything
+		Fs: afero.NewOsFs(),
 	}
+	cmn.SetUserConfig(userConfig)
+	return cmn
 }

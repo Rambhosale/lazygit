@@ -3,6 +3,7 @@ package helpers
 import (
 	"fmt"
 
+	"github.com/jesseduffield/gocui"
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
 	"github.com/jesseduffield/lazygit/pkg/gui/types"
 )
@@ -41,13 +42,11 @@ func (self *GpgHelper) WithGpgHandling(cmdObj oscommands.ICmdObj, waitingStatus 
 }
 
 func (self *GpgHelper) runAndStream(cmdObj oscommands.ICmdObj, waitingStatus string, onSuccess func() error) error {
-	return self.c.WithWaitingStatus(waitingStatus, func() error {
+	return self.c.WithWaitingStatus(waitingStatus, func(gocui.Task) error {
 		if err := cmdObj.StreamOutput().Run(); err != nil {
 			_ = self.c.Refresh(types.RefreshOptions{Mode: types.ASYNC})
-			return self.c.Error(
-				fmt.Errorf(
-					self.c.Tr.GitCommandFailed, self.c.UserConfig.Keybinding.Universal.ExtrasMenu,
-				),
+			return fmt.Errorf(
+				self.c.Tr.GitCommandFailed, self.c.UserConfig().Keybinding.Universal.ExtrasMenu,
 			)
 		}
 

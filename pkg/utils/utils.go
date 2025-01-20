@@ -3,9 +3,7 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -13,16 +11,8 @@ import (
 	"time"
 
 	"github.com/jesseduffield/gocui"
+	"github.com/jesseduffield/lazygit/pkg/config"
 )
-
-// GetCurrentRepoName gets the repo's base name
-func GetCurrentRepoName() string {
-	pwd, err := os.Getwd()
-	if err != nil {
-		log.Fatalln(err.Error())
-	}
-	return filepath.Base(pwd)
-}
 
 // GetProjectRoot returns the path to the root of the project. Only to be used
 // in testing contexts, as with binaries it's unlikely this path will exist on
@@ -36,27 +26,17 @@ func GetProjectRoot() string {
 }
 
 // Loader dumps a string to be displayed as a loader
-func Loader() string {
-	characters := "|/-\\"
-	now := time.Now()
-	nanos := now.UnixNano()
-	index := nanos / 50000000 % int64(len(characters))
-	return characters[index : index+1]
+func Loader(now time.Time, config config.SpinnerConfig) string {
+	milliseconds := now.UnixMilli()
+	index := milliseconds / int64(config.Rate) % int64(len(config.Frames))
+	return config.Frames[index]
 }
 
-// Min returns the minimum of two integers
-func Min(x, y int) int {
+func SortRange(x int, y int) (int, int) {
 	if x < y {
-		return x
+		return x, y
 	}
-	return y
-}
-
-func Max(x, y int) int {
-	if x > y {
-		return x
-	}
-	return y
+	return y, x
 }
 
 func Clamp(x int, min int, max int) int {

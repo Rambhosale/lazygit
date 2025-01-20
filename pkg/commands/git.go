@@ -2,11 +2,9 @@ package commands
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/go-errors/errors"
-	"github.com/sasha-s/go-deadlock"
 
 	gogit "github.com/jesseduffield/go-git/v5"
 	"github.com/jesseduffield/lazygit/pkg/commands/git_commands"
@@ -14,12 +12,12 @@ import (
 	"github.com/jesseduffield/lazygit/pkg/commands/oscommands"
 	"github.com/jesseduffield/lazygit/pkg/commands/patch"
 	"github.com/jesseduffield/lazygit/pkg/common"
-	"github.com/jesseduffield/lazygit/pkg/env"
 	"github.com/jesseduffield/lazygit/pkg/utils"
 )
 
 // GitCommand is our main git interface
 type GitCommand struct {
+	Blame       *git_commands.BlameCommands
 	Branch      *git_commands.BranchCommands
 	Commit      *git_commands.CommitCommands
 	Config      *git_commands.ConfigCommands
@@ -37,6 +35,9 @@ type GitCommand struct {
 	Tag         *git_commands.TagCommands
 	WorkingTree *git_commands.WorkingTreeCommands
 	Bisect      *git_commands.BisectCommands
+	Worktree    *git_commands.WorktreeCommands
+	Version     *git_commands.GitVersion
+	RepoPaths   *git_commands.RepoPaths
 
 	Loaders Loaders
 }
@@ -50,6 +51,7 @@ type Loaders struct {
 	RemoteLoader       *git_commands.RemoteLoader
 	StashLoader        *git_commands.StashLoader
 	TagLoader          *git_commands.TagLoader
+	Worktrees          *git_commands.WorktreeLoader
 }
 
 func NewGitCommand(
@@ -57,19 +59,25 @@ func NewGitCommand(
 	version *git_commands.GitVersion,
 	osCommand *oscommands.OSCommand,
 	gitConfig git_config.IGitConfig,
-	syncMutex *deadlock.Mutex,
 ) (*GitCommand, error) {
-	if err := navigateToRepoRootDirectory(os.Stat, os.Chdir); err != nil {
-		return nil, err
+	repoPaths, err := git_commands.GetRepoPaths(osCommand.Cmd, version)
+	if err != nil {
+		return nil, errors.Errorf("Error getting repo paths: %v", err)
 	}
 
-	repo, err := setupRepository(gogit.PlainOpenWithOptions, gogit.PlainOpenOptions{DetectDotGit: false, EnableDotGitCommonDir: true}, cmn.Tr.GitconfigParseErr)
+	err = os.Chdir(repoPaths.WorktreePath())
 	if err != nil {
-		return nil, err
+		return nil, utils.WrapError(err)
 	}
 
-	dotGitDir, err := findDotGitDir(os.Stat, os.ReadFile)
+	repository, err := gogit.PlainOpenWithOptions(
+		repoPaths.WorktreeGitDirPath(),
+		&gogit.PlainOpenOptions{DetectDotGit: false, EnableDotGitCommonDir: true},
+	)
 	if err != nil {
+		if strings.Contains(err.Error(), `unquoted '\' must be followed by new line`) {
+			return nil, errors.New(cmn.Tr.GitconfigParseErr)
+		}
 		return nil, err
 	}
 
@@ -78,9 +86,8 @@ func NewGitCommand(
 		version,
 		osCommand,
 		gitConfig,
-		dotGitDir,
-		repo,
-		syncMutex,
+		repoPaths,
+		repository,
 	), nil
 }
 
@@ -89,9 +96,8 @@ func NewGitCommandAux(
 	version *git_commands.GitVersion,
 	osCommand *oscommands.OSCommand,
 	gitConfig git_config.IGitConfig,
-	dotGitDir string,
+	repoPaths *git_commands.RepoPaths,
 	repo *gogit.Repository,
-	syncMutex *deadlock.Mutex,
 ) *GitCommand {
 	cmd := NewGitCmdObjBuilder(cmn.Log, osCommand.Cmd)
 
@@ -102,9 +108,9 @@ func NewGitCommandAux(
 	// common ones are: cmn, osCommand, dotGitDir, configCommands
 	configCommands := git_commands.NewConfigCommands(cmn, gitConfig, repo)
 
-	fileLoader := git_commands.NewFileLoader(cmn, cmd, configCommands)
+	gitCommon := git_commands.NewGitCommon(cmn, version, cmd, osCommand, repoPaths, repo, configCommands)
 
-	gitCommon := git_commands.NewGitCommon(cmn, version, cmd, osCommand, dotGitDir, repo, configCommands, syncMutex)
+	fileLoader := git_commands.NewFileLoader(gitCommon, cmd, configCommands)
 	statusCommands := git_commands.NewStatusCommands(gitCommon)
 	flowCommands := git_commands.NewFlowCommands(gitCommon)
 	remoteCommands := git_commands.NewRemoteCommands(gitCommon)
@@ -121,22 +127,24 @@ func NewGitCommandAux(
 	stashCommands := git_commands.NewStashCommands(gitCommon, fileLoader, workingTreeCommands)
 	patchBuilder := patch.NewPatchBuilder(cmn.Log,
 		func(from string, to string, reverse bool, filename string, plain bool) (string, error) {
-			// TODO: make patch builder take Gui.IgnoreWhitespaceInDiffView into
-			// account. For now we just pass false.
-			return workingTreeCommands.ShowFileDiff(from, to, reverse, filename, plain, false)
+			return workingTreeCommands.ShowFileDiff(from, to, reverse, filename, plain)
 		})
 	patchCommands := git_commands.NewPatchCommands(gitCommon, rebaseCommands, commitCommands, statusCommands, stashCommands, patchBuilder)
 	bisectCommands := git_commands.NewBisectCommands(gitCommon)
+	worktreeCommands := git_commands.NewWorktreeCommands(gitCommon)
+	blameCommands := git_commands.NewBlameCommands(gitCommon)
 
-	branchLoader := git_commands.NewBranchLoader(cmn, cmd, branchCommands.CurrentBranchInfo, configCommands)
+	branchLoader := git_commands.NewBranchLoader(cmn, gitCommon, cmd, branchCommands.CurrentBranchInfo, configCommands)
 	commitFileLoader := git_commands.NewCommitFileLoader(cmn, cmd)
-	commitLoader := git_commands.NewCommitLoader(cmn, cmd, dotGitDir, statusCommands.RebaseMode, gitCommon)
+	commitLoader := git_commands.NewCommitLoader(cmn, cmd, statusCommands.RebaseMode, gitCommon)
 	reflogCommitLoader := git_commands.NewReflogCommitLoader(cmn, cmd)
 	remoteLoader := git_commands.NewRemoteLoader(cmn, cmd, repo.Remotes)
+	worktreeLoader := git_commands.NewWorktreeLoader(gitCommon)
 	stashLoader := git_commands.NewStashLoader(cmn, cmd)
 	tagLoader := git_commands.NewTagLoader(cmn, cmd)
 
 	return &GitCommand{
+		Blame:       blameCommands,
 		Branch:      branchCommands,
 		Commit:      commitCommands,
 		Config:      configCommands,
@@ -154,6 +162,8 @@ func NewGitCommandAux(
 		Tag:         tagCommands,
 		Bisect:      bisectCommands,
 		WorkingTree: workingTreeCommands,
+		Worktree:    worktreeCommands,
+		Version:     version,
 		Loaders: Loaders{
 			BranchLoader:       branchLoader,
 			CommitFileLoader:   commitFileLoader,
@@ -161,119 +171,12 @@ func NewGitCommandAux(
 			FileLoader:         fileLoader,
 			ReflogCommitLoader: reflogCommitLoader,
 			RemoteLoader:       remoteLoader,
+			Worktrees:          worktreeLoader,
 			StashLoader:        stashLoader,
 			TagLoader:          tagLoader,
 		},
+		RepoPaths: repoPaths,
 	}
-}
-
-func navigateToRepoRootDirectory(stat func(string) (os.FileInfo, error), chdir func(string) error) error {
-	gitDir := env.GetGitDirEnv()
-	if gitDir != "" {
-		// we've been given the git directory explicitly so no need to navigate to it
-		_, err := stat(gitDir)
-		if err != nil {
-			return utils.WrapError(err)
-		}
-
-		return nil
-	}
-
-	// we haven't been given the git dir explicitly so we assume it's in the current working directory as `.git/` (or an ancestor directory)
-
-	for {
-		_, err := stat(".git")
-
-		if err == nil {
-			return nil
-		}
-
-		if !os.IsNotExist(err) {
-			return utils.WrapError(err)
-		}
-
-		if err = chdir(".."); err != nil {
-			return utils.WrapError(err)
-		}
-
-		currentPath, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-
-		atRoot := currentPath == filepath.Dir(currentPath)
-		if atRoot {
-			// we should never really land here: the code that creates GitCommand should
-			// verify we're in a git directory
-			return errors.New("Must open lazygit in a git repository")
-		}
-	}
-}
-
-// resolvePath takes a path containing a symlink and returns the true path
-func resolvePath(path string) (string, error) {
-	l, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-
-	if l.Mode()&os.ModeSymlink == 0 {
-		return path, nil
-	}
-
-	return filepath.EvalSymlinks(path)
-}
-
-func setupRepository(openGitRepository func(string, *gogit.PlainOpenOptions) (*gogit.Repository, error), options gogit.PlainOpenOptions, gitConfigParseErrorStr string) (*gogit.Repository, error) {
-	unresolvedPath := env.GetGitDirEnv()
-	if unresolvedPath == "" {
-		var err error
-		unresolvedPath, err = os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	path, err := resolvePath(unresolvedPath)
-	if err != nil {
-		return nil, err
-	}
-
-	repository, err := openGitRepository(path, &options)
-	if err != nil {
-		if strings.Contains(err.Error(), `unquoted '\' must be followed by new line`) {
-			return nil, errors.New(gitConfigParseErrorStr)
-		}
-
-		return nil, err
-	}
-
-	return repository, err
-}
-
-func findDotGitDir(stat func(string) (os.FileInfo, error), readFile func(filename string) ([]byte, error)) (string, error) {
-	if env.GetGitDirEnv() != "" {
-		return env.GetGitDirEnv(), nil
-	}
-
-	f, err := stat(".git")
-	if err != nil {
-		return "", err
-	}
-
-	if f.IsDir() {
-		return ".git", nil
-	}
-
-	fileBytes, err := readFile(".git")
-	if err != nil {
-		return "", err
-	}
-	fileContent := string(fileBytes)
-	if !strings.HasPrefix(fileContent, "gitdir: ") {
-		return "", errors.New(".git is a file which suggests we are in a submodule or a worktree but the file's contents do not contain a gitdir pointing to the actual .git directory")
-	}
-	return strings.TrimSpace(strings.TrimPrefix(fileContent, "gitdir: ")), nil
 }
 
 func VerifyInGitRepo(osCommand *oscommands.OSCommand) error {

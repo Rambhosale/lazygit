@@ -43,7 +43,7 @@ func (self *ConfigCommands) ConfiguredPager() string {
 }
 
 func (self *ConfigCommands) GetPager(width int) string {
-	useConfig := self.UserConfig.Git.Paging.UseConfig
+	useConfig := self.UserConfig().Git.Paging.UseConfig
 	if useConfig {
 		pager := self.ConfiguredPager()
 		return strings.Split(pager, "| less")[0]
@@ -53,14 +53,14 @@ func (self *ConfigCommands) GetPager(width int) string {
 		"columnWidth": strconv.Itoa(width/2 - 6),
 	}
 
-	pagerTemplate := self.UserConfig.Git.Paging.Pager
+	pagerTemplate := string(self.UserConfig().Git.Paging.Pager)
 	return utils.ResolvePlaceholderString(pagerTemplate, templateValues)
 }
 
 // UsingGpg tells us whether the user has gpg enabled so that we can know
 // whether we need to run a subprocess to allow them to enter their password
 func (self *ConfigCommands) UsingGpg() bool {
-	overrideGpg := self.UserConfig.Git.OverrideGpg
+	overrideGpg := self.UserConfig().Git.OverrideGpg
 	if overrideGpg {
 		return false
 	}
@@ -106,4 +106,8 @@ func (self *ConfigCommands) GetCoreCommentChar() byte {
 	}
 
 	return '#'
+}
+
+func (self *ConfigCommands) GetRebaseUpdateRefs() bool {
+	return self.gitConfig.GetBool("rebase.updateRefs")
 }
